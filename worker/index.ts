@@ -1,8 +1,12 @@
 import { handle } from '../lib/server';
 import { agentGuide } from '../lib/agent-guide';
 import { mailGuide } from '../lib/mail-guide';
+import { cleanupMail } from '../lib/mail-retention';
 
 export default {
+  async scheduled(_controller: ScheduledController, env: Cloudflare.Env) {
+    await cleanupMail(env.DB);
+  },
   async fetch(request: Request, env: Cloudflare.Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === '/agent') return new Response(agentGuide(url.origin), {

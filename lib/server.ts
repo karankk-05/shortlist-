@@ -4,6 +4,7 @@ import { agentGuide } from './agent-guide';
 import { mailGuide } from './mail-guide';
 import { mailConfig, mailHash, mailLease, mailStatus, saveMail, syncMail } from './mail-service';
 import { validateMailConfig } from './mail-content';
+import { cleanupMail, MAIL_RETENTION_DAYS } from './mail-retention';
 import { COLUMNS, csvRows, InputError, sameShortlistRows, StudentRow, toCSV, validateRows } from './records';
 
 type Actor = { role: 'admin' | 'uploader'; id: string; label: string };
@@ -127,7 +128,7 @@ async function createDraft(request: Request, listId?: string) {
     const job = await mailLease(db(), mailJobId, input.mail_lease_token);
     if ((JSON.parse(job.source_upload_ids) as string[]).some(value => !sourceIds.includes(value))) throw new InputError('Link every attachment from this mail job in source_upload_ids, including any you explain as irrelevant in processing_notes.');
   }
-  for (const sourceId of sourceIds) if (!(await db().prepare('SELECT id FROM uploads WHERE id = ?').bind(sourceId).first())) throw new InputError('A source upload does not exist.');
+  for (const sourceId of sourceIds) if (!(await db().prepare('SELECT id FROM uploads WHERE id = ? AND purged_at IS NULL').bind(sourceId).first())) throw new InputError('A source upload is unavailable or has been removed by mail retention.');
   let list: List; let number = 1; let latestVersionId: string | null = null;
   if (listId) {
     list = await findList(listId);
@@ -157,6 +158,7 @@ async function createDraft(request: Request, listId?: string) {
     await db().batch(statements);
   } catch (error) {
     await bucket().delete(key);
+    if (String(error).includes('source_upload_unavailable')) throw new InputError('A source upload was removed before this draft could be saved. Refresh the source files.', 409);
     if (String(error).includes('UNIQUE')) throw new InputError('Another draft was created in parallel. Refresh versions and retry.', 409);
     throw error;
   }
@@ -231,6 +233,11 @@ export async function handle(request: Request): Promise<Response> {
         ]);
         await log('mail_configured', user.id, 'mail'); return json({ config });
       }
+      if (method === 'POST' && item === 'cleanup') {
+        await access(request, true);
+        if (Object.keys(await body(request)).length) throw new InputError('Send {}. Cleanup always uses seven days after completion and preserves all shortlists.');
+        return json(await cleanupMail(db()));
+      }
       if (method === 'POST' && item === 'sync') { const result = await syncMail(db(), env); await log('mail_synced', user.id, 'mail'); return json(result); }
       if (method === 'POST' && item === 'import') {
         await access(request, true);
@@ -243,7 +250,7 @@ export async function handle(request: Request): Promise<Response> {
     }
     if (resource === 'mail-jobs') {
       const user = await access(request);
-      const fields = 'id, subject, sender, received_at, status, note, duplicate_of, lease_until, result_version_ids, created_at, updated_at';
+      const fields = 'id, subject, sender, received_at, status, note, duplicate_of, lease_until, result_version_ids, completed_at, source_deleted_at, created_at, updated_at';
       if (method === 'GET' && !item) {
         const status = url.searchParams.get('status') || 'pending';
         if (!['pending', 'processing', 'needs_review', 'done', 'ignored', 'all'].includes(status)) throw new InputError('Invalid mail job status.');
@@ -256,10 +263,11 @@ export async function handle(request: Request): Promise<Response> {
       if (method === 'GET' && item && !action) {
         const job = await db().prepare(`SELECT ${fields}, object_key, source_upload_ids FROM mail_jobs WHERE id = ?`).bind(item).first<Record<string, unknown>>();
         if (!job) throw new InputError('Mail job not found.', 404);
-        const object = await bucket().get(job.object_key as string); if (!object) throw new InputError('Mail source is unavailable.', 503);
+        const object = job.source_deleted_at ? null : await bucket().get(job.object_key as string);
+        if (!object && !job.source_deleted_at) throw new InputError('Mail source is unavailable.', 503);
         const versions = await mailVersions(item);
         const { object_key: _key, ...metadata } = job;
-        return json({ job: { ...metadata, result_version_ids: JSON.parse(job.result_version_ids as string), source_upload_ids: JSON.parse(job.source_upload_ids as string) }, source: await object.json(), versions: versions.results });
+        return json({ job: { ...metadata, result_version_ids: JSON.parse(job.result_version_ids as string), source_upload_ids: JSON.parse(job.source_upload_ids as string) }, source: object ? await object.json() : { text: '', attachments: [], links: [], deleted_at: job.source_deleted_at, retention_days: MAIL_RETENTION_DAYS }, versions: versions.results });
       }
       if (method === 'POST' && item && action === 'claim') {
         const token = id(), time = now(), until = new Date(Date.now() + 7200000).toISOString();
@@ -290,7 +298,8 @@ export async function handle(request: Request): Promise<Response> {
         if (action === 'complete' && (!versions.results.length || versions.results.some(version => !version.published_at || version.deleted_at || version.published_version_id !== version.id))) throw new InputError('Every draft linked to this mail job must be the current public version before completion. Otherwise mark the job for review.');
         if (action === 'ignore' && versions.results.length) throw new InputError('This mail job already has draft or published results. Mark it for review instead.');
         const status = action === 'complete' ? 'done' : action === 'review' ? 'needs_review' : 'ignored';
-        const result = await db().prepare("UPDATE mail_jobs SET status = ?, note = ?, result_version_ids = ?, lease_hash = NULL, lease_until = NULL, claimed_by = NULL, updated_at = ? WHERE id = ? AND status = 'processing' AND lease_hash = ? AND lease_until > ?").bind(status, note, JSON.stringify(versions.results.filter(version => version.published_at).map(version => version.id)), now(), item, await mailHash(input.lease_token as string), now()).run();
+        const time = now();
+        const result = await db().prepare("UPDATE mail_jobs SET status = ?, note = ?, result_version_ids = ?, lease_hash = NULL, lease_until = NULL, claimed_by = NULL, updated_at = ?, completed_at = ? WHERE id = ? AND status = 'processing' AND lease_hash = ? AND lease_until > ?").bind(status, note, JSON.stringify(versions.results.filter(version => version.published_at).map(version => version.id)), time, status === 'done' ? time : null, item, await mailHash(input.lease_token as string), now()).run();
         if (result.meta.changes !== 1) throw new InputError('The job lease changed. Refresh before retrying.', 409);
         await log('mail_job_' + status, user.id, item); return json({ id: item, status });
       }
@@ -327,10 +336,12 @@ export async function handle(request: Request): Promise<Response> {
     }
     if (resource === 'uploads') {
       const user = await access(request);
-      if (method === 'GET' && !item) return json({ uploads: (await db().prepare('SELECT id, filename, size, content_type, created_at FROM uploads ORDER BY created_at DESC LIMIT 100').all()).results });
+      if (method === 'GET' && !item) return json({ uploads: (await db().prepare('SELECT id, filename, size, content_type, created_at FROM uploads WHERE purged_at IS NULL ORDER BY created_at DESC LIMIT 100').all()).results });
       if (method === 'GET' && item) {
-        const file = await db().prepare('SELECT * FROM uploads WHERE id = ?').bind(item).first<{ object_key: string; filename: string; content_type: string }>();
-        if (!file) throw new InputError('Upload not found.', 404); const object = await bucket().get(file.object_key); if (!object) throw new InputError('File unavailable.', 404);
+        const file = await db().prepare('SELECT * FROM uploads WHERE id = ?').bind(item).first<{ object_key: string; filename: string; content_type: string; purged_at: string | null }>();
+        if (!file) throw new InputError('Upload not found.', 404);
+        if (file.purged_at) throw new InputError('This completed mail attachment was deleted by the seven-day retention policy. Published shortlists are preserved.', 410);
+        const object = await bucket().get(file.object_key); if (!object) throw new InputError('File unavailable.', 404);
         return new Response(object.body, { headers: { ...responseHeaders, 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(file.filename)}` } });
       }
       if (method === 'POST' && !item) {
@@ -400,6 +411,7 @@ function openapi(origin: string) {
     '/mail/status': { get: { operationId: 'mailStatus', summary: 'Private mailbox connection state and configuration; never returns the password', security: secured, responses: response } },
     '/mail/config': { put: { operationId: 'configureMail', summary: 'Owner only: mailbox folder, lookback, sender and link-domain rules', security: ownerOnly, requestBody: bodySchema({ type: 'object', required: ['enabled','folder','lookback_days','senders','link_domains'], properties: { enabled: { type: 'boolean' }, folder: { type: 'string' }, lookback_days: { type: 'integer', minimum: 1, maximum: 365 }, senders: { type: 'array', items: { type: 'string' } }, link_domains: { type: 'array', items: { type: 'string' } } } }), responses: response } },
     '/mail/sync': { post: { operationId: 'syncMail', summary: 'Read matching mail into a private queue; repeat while more is true', security: secured, responses: { ...response, '502': { description: 'IITK IMAP sync failed' }, '503': { description: 'Mail credentials have not been configured' } } } },
+    '/mail/cleanup': { post: { operationId: 'cleanupCompletedMail', summary: 'Owner only: run the fixed seven-day completed-mail retention policy; no shortlists are deleted. Also runs hourly on Cloudflare.', security: ownerOnly, requestBody: bodySchema({ type: 'object', additionalProperties: false }), responses: response } },
     '/mail/import': { post: { operationId: 'importOwnMail', summary: 'Owner only: import an owned EML message for testing or manual ingestion', security: ownerOnly, requestBody: { required: true, content: { 'message/rfc822': { schema: { type: 'string', format: 'binary' } } } }, responses: { ...response, '201': { description: 'Queued, duplicate or sender/keyword-filtered message' } } } },
     '/mail-jobs': { get: { operationId: 'listMailJobs', summary: 'Private queue, newest received first; pending includes expired job claims', security: secured, parameters: [{ name: 'status', in: 'query', schema: { type: 'string', enum: ['pending','processing','needs_review','done','ignored','all'], default: 'pending' } }, { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 50 } }], responses: response } },
     '/mail-jobs/{id}': { parameters: [parameter], get: { operationId: 'readMailJob', summary: 'Private email text, attachments, links and previously prepared results', security: secured, responses: response } },
@@ -420,6 +432,6 @@ function openapi(origin: string) {
     '/master/info': { get: { operationId: 'readMasterInfo', security: secured, responses: response } },
     '/master.csv': { get: { operationId: 'downloadPrivateMaster', security: secured, responses: response } },
     '/uploads': { get: { operationId: 'listPrivateInputs', security: secured, responses: response }, post: { operationId: 'uploadPrivateInput', security: secured, requestBody: { required: true, content: { 'multipart/form-data': { schema: { type: 'object', required: ['file'], properties: { file: { type: 'string', format: 'binary' } } } } } }, responses: response } },
-    '/uploads/{id}': { parameters: [parameter], get: { operationId: 'downloadPrivateInput', security: secured, responses: response } },
+    '/uploads/{id}': { parameters: [parameter], get: { operationId: 'downloadPrivateInput', security: secured, responses: { ...response, '410': { description: 'Completed mail attachment deleted after seven days; shortlist results remain available' } } } },
   } };
 }

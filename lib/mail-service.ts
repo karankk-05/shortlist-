@@ -3,6 +3,7 @@ import { objectStore } from './object-store';
 import { InputError } from './records';
 import { ImapReader, IMAP_HOST, IMAP_PORT, MAX_MAIL_BYTES, MailError } from './imap';
 import { DEFAULT_MAIL_CONFIG, hasShortlistKeyword, parseMail, type MailConfig } from './mail-content';
+import { MAIL_RETENTION_DAYS } from './mail-retention';
 
 export async function mailHash(value: string | Uint8Array) {
   const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
@@ -17,7 +18,8 @@ export async function mailStatus(db: D1Database, env: Cloudflare.Env, admin: boo
   const account = env.MAIL_USERNAME ? await mailHash(env.MAIL_USERNAME.toLowerCase() + '\n' + config.folder) : null;
   const state = account ? await db.prepare('SELECT last_attempt_at, last_success_at, last_error, lock_until FROM mail_state WHERE account_id = ?').bind(account).first() : null;
   const counts = await db.prepare('SELECT status, count(*) AS count FROM mail_jobs GROUP BY status').all();
-  return { configured: !!(env.MAIL_USERNAME && env.MAIL_PASSWORD), ...(admin ? { username: env.MAIL_USERNAME || null } : {}), config, state, counts: counts.results, host: IMAP_HOST, port: IMAP_PORT, read_only: true };
+  const cleanup = await db.prepare("SELECT value FROM settings WHERE key = 'mail_cleanup_last_run'").first<{ value: string }>();
+  return { configured: !!(env.MAIL_USERNAME && env.MAIL_PASSWORD), ...(admin ? { username: env.MAIL_USERNAME || null } : {}), config, state, counts: counts.results, host: IMAP_HOST, port: IMAP_PORT, read_only: true, retention: { days: MAIL_RETENTION_DAYS, status: 'done', check_interval: 'hourly', last_run: cleanup ? JSON.parse(cleanup.value) : null } };
 }
 type StoredFile = { id: string; filename: string; size: number; content_type: string; inline?: boolean; content_id?: string };
 type ExistingMail = { id: string; object_key: string; status: string; note: string; received_at: string | null; updated_at: string; result_version_ids: string };

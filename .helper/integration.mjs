@@ -12,7 +12,7 @@ rmSync(state, { recursive: true, force: true });
 const cli = 'node_modules/wrangler/bin/wrangler.js';
 const migrated = spawnSync(process.execPath, [cli, 'd1', 'migrations', 'apply', 'DB', '--local', '--persist-to', state], { encoding: 'utf8' });
 if (migrated.status !== 0) throw new Error(migrated.stdout + migrated.stderr);
-const server = spawn(process.execPath, [cli, 'dev', '--local', '--ip', '127.0.0.1', '--port', '8788', '--persist-to', state, '--var', 'ADMIN_KEY_SHA256:' + ownerHash], { stdio: ['ignore', 'pipe', 'pipe'] });
+const server = spawn(process.execPath, [cli, 'dev', '--local', '--test-scheduled', '--ip', '127.0.0.1', '--port', '8788', '--persist-to', state, '--var', 'ADMIN_KEY_SHA256:' + ownerHash], { stdio: ['ignore', 'pipe', 'pipe'] });
 let logs = '';
 for (const stream of [server.stdout, server.stderr]) stream.on('data', chunk => { logs = (logs + chunk).slice(-12000); });
 try {
@@ -259,9 +259,93 @@ await call(`shortlists/${mailDraft.shortlist_id}/publish`, { method: 'POST', key
 assert.equal((await call('shortlists/' + mailDraft.shortlist_id)).result.shortlist.added_at, revisionDetail.job.received_at);
 await call(`shortlists/${mailDraft.shortlist_id}/restore`, { method: 'POST', owner: true, data: { version_id: mailDraft.version_id, expected_current_version_id: revision.version_id, acknowledge_warnings: true } });
 assert.equal((await call('shortlists/' + mailDraft.shortlist_id)).result.shortlist.added_at, publishedMail.shortlist.added_at);
+// Seven-day retention deletes completed sources without changing any shortlist or master.
+function retentionSql(command, fail = false) {
+  const result = spawnSync(process.execPath, [cli, 'd1', 'execute', 'DB', '--local', '--persist-to', state, '--json', '--command', command], { encoding: 'utf8' });
+  if (fail) { assert.notEqual(result.status, 0); assert.match(result.stdout + result.stderr, /source_upload_unavailable/); return; }
+  assert.equal(result.status, 0, 'Synthetic retention SQL failed: ' + result.stdout + result.stderr);
+  return JSON.parse(result.stdout).map(item => item.results);
+}
+const sqlText = value => "'" + String(value).replaceAll("'", "''") + "'";
+const protectedSnapshotSql = `SELECT * FROM shortlists ORDER BY id; SELECT * FROM versions ORDER BY id; SELECT * FROM masters ORDER BY id;
+SELECT * FROM objects WHERE key IN (SELECT object_key FROM masters UNION SELECT object_key FROM versions) ORDER BY key;
+SELECT object_key, chunk_index, hex(bytes) AS content FROM object_chunks WHERE object_key IN (SELECT object_key FROM masters UNION SELECT object_key FROM versions) ORDER BY object_key, chunk_index;`;
+await call('mail/cleanup', { method: 'POST', data: {}, expected: 401 });
+await call('mail/cleanup', { method: 'POST', key: true, data: {}, expected: 403 });
+await call('mail/cleanup', { method: 'POST', owner: true, evil: true, data: {}, expected: 403 });
+await call('mail/cleanup', { method: 'POST', owner: true, data: { retention_days: 0 }, expected: 400 });
+const policy = (await call('mail/status', { owner: true })).result.retention;
+assert.equal(policy.days, 7); assert.equal(policy.check_interval, 'hourly');
+const attachmentId = mailDetail.source.attachments[0].id;
+const sharedJob = (await call('mail-jobs/' + duplicateMail.id, { key: true })).result;
+const protectedDraft = (await call('shortlists', { method: 'POST', key: true, data: { ...input, company: input.company + ' retention-protected draft', source_upload_ids: [attachmentId] }, expected: 201 })).result;
+const ignoredMail = (await call('mail/import', { method: 'POST', owner: true, raw: eml.replace('mail-qa@', 'mail-retention-ignored@'), expected: 201 })).result;
+const ignoredClaim = (await call(`mail-jobs/${ignoredMail.id}/claim`, { method: 'POST', key: true, data: {} })).result;
+await call(`mail-jobs/${ignoredMail.id}/ignore`, { method: 'POST', key: true, data: { lease_token: ignoredClaim.lease_token, note: 'Synthetic ignored source stays outside completed-only cleanup.' } });
+const oldCompletion = new Date(Date.now() - 7 * 86400000 - 1000).toISOString();
+const recentCompletion = new Date().toISOString();
+const firstMailKey = 'mail/' + mail.id + '.json', oldSourceKey = 'mail/' + mail.id + '-superseded.json';
+retentionSql(`UPDATE mail_jobs SET completed_at = ${sqlText(oldCompletion)}, updated_at = ${sqlText(new Date().toISOString())} WHERE id = ${sqlText(mail.id)};
+UPDATE mail_jobs SET received_at = '2000-01-01T00:00:00.000Z', completed_at = NULL WHERE id = ${sqlText(resend.id)};
+UPDATE mail_jobs SET status = 'done', updated_at = ${sqlText(recentCompletion)} WHERE id = ${sqlText(resend.id)};
+UPDATE mail_jobs SET completed_at = '2000-01-01T00:00:00.000Z', created_at = '2000-01-01T00:00:00.000Z' WHERE id IN (${[duplicateMail.id, historicalMail.id, mediaJob.id, ignoredMail.id].map(sqlText).join(',')});
+UPDATE mail_jobs SET source_upload_ids = json_insert(source_upload_ids, '$[#]', ${sqlText(attachmentId)}) WHERE id = ${sqlText(duplicateMail.id)};
+INSERT INTO objects SELECT ${sqlText(oldSourceKey)}, size, chunks FROM objects WHERE key = ${sqlText(firstMailKey)};
+INSERT INTO object_chunks SELECT ${sqlText(oldSourceKey)}, chunk_index, bytes FROM object_chunks WHERE object_key = ${sqlText(firstMailKey)};`);
+const beforeProtected = retentionSql(protectedSnapshotSql);
+const beforeMailRows = (await call('shortlists/' + mailDraft.shortlist_id)).result;
+const beforeMasterRows = (await call('master', { owner: true })).result.rows;
+const firstCleanup = (await call('mail/cleanup', { method: 'POST', owner: true, data: {} })).result;
+assert.equal(firstCleanup.jobs_cleaned, 1); assert.equal(firstCleanup.attachments_deleted, 0, 'Unfinished jobs and drafts protect shared attachments');
+assert.ok(firstCleanup.bytes_deleted > 0);
+assert.deepEqual(retentionSql(protectedSnapshotSql), beforeProtected, 'Every shortlist, version, master and their exact object bytes must be unchanged');
+const expiredSource = (await call('mail-jobs/' + mail.id, { key: true })).result;
+assert.ok(expiredSource.job.source_deleted_at); assert.equal(expiredSource.job.completed_at, oldCompletion);
+assert.equal(expiredSource.job.received_at, mailDetail.job.received_at);
+assert.deepEqual(expiredSource.source.attachments, []); assert.deepEqual(expiredSource.source.links, []); assert.equal(expiredSource.source.text, '');
+assert.equal(expiredSource.versions[0].id, mailDraft.version_id);
+assert.match((await call('uploads/' + attachmentId, { key: true })).result, /Synthetic Test A/);
+assert.deepEqual(retentionSql(`SELECT count(*) AS count FROM objects WHERE key IN (${sqlText(firstMailKey)},${sqlText(oldSourceKey)}); SELECT count(*) AS count FROM object_chunks WHERE object_key IN (${sqlText(firstMailKey)},${sqlText(oldSourceKey)});`), [[{ count: 0 }], [{ count: 0 }]], 'Delete current and superseded source chunks');
+const reimportExpired = (await call('mail/import', { method: 'POST', owner: true, raw: eml, expected: 201 })).result;
+assert.equal(reimportExpired.duplicate, true); assert.equal(reimportExpired.queued, undefined, 'A rescan must not recreate a completed, cleaned mail');
+for (const keptId of [resend.id, duplicateMail.id, historicalMail.id, mediaJob.id, ignoredMail.id]) {
+  const kept = (await call('mail-jobs/' + keptId, { key: true })).result;
+  assert.equal(kept.job.source_deleted_at, null); assert.ok(kept.source.text, 'Recent completion or unfinished/ignored status must retain its source');
+  if (keptId === resend.id) assert.equal(kept.job.completed_at, recentCompletion, 'Database records completion even for a legacy Worker during deployment');
+}
+retentionSql(`UPDATE mail_jobs SET source_upload_ids = ${sqlText(JSON.stringify(sharedJob.job.source_upload_ids))} WHERE id = ${sqlText(duplicateMail.id)};`);
+const stillDraft = (await call('mail/cleanup', { method: 'POST', owner: true, data: {} })).result;
+assert.equal(stillDraft.attachments_deleted, 0, 'An unpublished draft alone must protect its source');
+await call(`shortlists/${protectedDraft.shortlist_id}/publish`, { method: 'POST', key: true, data: { version_id: protectedDraft.version_id, expected_current_version_id: null, acknowledge_warnings: true } });
+const publishedProtected = retentionSql(protectedSnapshotSql);
+const finalCleanup = (await call('mail/cleanup', { method: 'POST', owner: true, data: {} })).result;
+assert.equal(finalCleanup.jobs_cleaned, 0); assert.equal(finalCleanup.attachments_deleted, 1); assert.ok(finalCleanup.bytes_deleted > 0);
+assert.deepEqual(retentionSql(protectedSnapshotSql), publishedProtected, 'Cleaning attachments must preserve complete version history, drafts and masters');
+await call('uploads/' + attachmentId, { expected: 401 });
+await call('uploads/' + attachmentId, { key: true, expected: 410 });
+assert.equal((await call('uploads', { key: true })).result.uploads.some(file => file.id === attachmentId), false);
+assert.deepEqual((await call('master', { owner: true })).result.rows, beforeMasterRows);
+assert.deepEqual((await call('shortlists/' + mailDraft.shortlist_id)).result, beforeMailRows, 'Public values, version ID and Date added must remain identical');
+assert.deepEqual((await call('shortlists/' + protectedDraft.shortlist_id)).result.rows, rows);
+assert.match((await call('uploads/' + upload.id, { key: true })).result, /Synthetic/, 'Manual uploads are never expired by mail retention');
+assert.deepEqual(retentionSql(`SELECT count(*) AS count FROM objects WHERE key = 'inputs/${attachmentId}'; SELECT count(*) AS count FROM object_chunks WHERE object_key = 'inputs/${attachmentId}'; SELECT purged_at IS NOT NULL AS marked FROM uploads WHERE id = ${sqlText(attachmentId)};`), [[{ count: 0 }], [{ count: 0 }], [{ marked: 1 }]], 'Delete attachment bytes and retain an explicit audit marker');
+await call('shortlists', { method: 'POST', key: true, data: { ...input, company: input.company + ' expired attachment', source_upload_ids: [attachmentId] }, expected: 400 });
+retentionSql(`INSERT INTO versions (id, shortlist_id, number, object_key, row_count, master_id, created_at, created_by, processing_notes, warnings, source_upload_ids, published_at, source_mail_job_id)
+SELECT ${sqlText('synthetic-race-' + Date.now())}, shortlist_id, 99999, object_key, row_count, master_id, created_at, created_by, processing_notes, warnings, ${sqlText(JSON.stringify([attachmentId]))}, NULL, NULL FROM versions WHERE id = ${sqlText(protectedDraft.version_id)};`, true);
+const idempotentCleanup = (await call('mail/cleanup', { method: 'POST', owner: true, data: {} })).result;
+assert.equal(idempotentCleanup.jobs_cleaned, 0); assert.equal(idempotentCleanup.attachments_deleted, 0); assert.equal(idempotentCleanup.bytes_deleted, 0);
+await call(`shortlists/${mailDraft.shortlist_id}/restore`, { method: 'POST', owner: true, data: { version_id: revision.version_id, expected_current_version_id: mailDraft.version_id, acknowledge_warnings: true } });
+await call(`shortlists/${mailDraft.shortlist_id}/restore`, { method: 'POST', owner: true, data: { version_id: mailDraft.version_id, expected_current_version_id: revision.version_id, acknowledge_warnings: true } });
+assert.deepEqual((await call('shortlists/' + mailDraft.shortlist_id)).result.rows, rows, 'Historical versions remain restorable after source expiry');
+const cron = new URL('/__scheduled', origin); cron.searchParams.set('cron', '0 * * * *');
+const cronRun = await fetch(cron);
+assert.equal(cronRun.status, 200, 'Local Cloudflare scheduled handler must execute successfully'); count++;
+const finalRetentionState = (await call('mail/status', { owner: true })).result.retention.last_run;
+assert.equal(finalRetentionState.status, 'ok'); assert.equal(finalRetentionState.jobs_cleaned, 0);
+
 await call('keys/' + key.id, { method: 'DELETE', owner: true });
 await call('master', { key: true, expected: 401 });
-console.log(JSON.stringify({ passed: true, http_checks: count, all_records_synthetic: true, checked: ['private master', 'anonymous write denial', 'uploader scopes', 'private source files', 'six columns', 'draft privacy', 'publication', 'CSV', 'version conflicts', 'restore', 'owner-only deletion', 'deleted export denial', 'stale deletion rejection', 'deleted shortlist recovery', 'private draft recovery', 'private mail ingestion', 'mail attachment storage', 'duplicate message detection', 'unapproved links', 'exclusive job claims', 'lease expiry and crash recovery', 'mail result publication', 'review and owner retry', 'key revocation', 'CSRF'] }, null, 2));
+console.log(JSON.stringify({ passed: true, http_checks: count, all_records_synthetic: true, checked: ['private master', 'anonymous write denial', 'uploader scopes', 'private source files', 'six columns', 'draft privacy', 'publication', 'CSV', 'version conflicts', 'restore', 'owner-only deletion', 'deleted export denial', 'stale deletion rejection', 'deleted shortlist recovery', 'private draft recovery', 'private mail ingestion', 'mail attachment storage', 'duplicate message detection', 'unapproved links', 'exclusive job claims', 'lease expiry and crash recovery', 'mail result publication', 'review and owner retry', 'seven-day completed-only retention', 'shared attachment protection', 'exact shortlist/master byte preservation', 'source deletion audit markers', 'retention idempotency', 'cron handler', 'key revocation', 'CSRF'] }, null, 2));
 
 } finally {
   server.kill('SIGTERM');

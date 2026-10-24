@@ -71,6 +71,7 @@ Private API endpoints:
 | POST | `/api/v1/mail-jobs/{id}/claim` | Owner/uploader; returns `lease_token` |
 | POST | `/api/v1/mail-jobs/{id}/reuse` | Active lease; link the current publication for a verified duplicate event and candidate list |
 | POST | `/api/v1/mail-jobs/{id}/complete` | Active lease; all new or reused results must be published |
+| POST | `/api/v1/mail/cleanup` | Owner only; fixed seven-day completed-source cleanup, also scheduled hourly |
 | POST | `/api/v1/mail-jobs/{id}/review` or `/ignore` | Active lease; explanation required |
 | POST | `/api/v1/mail-jobs/{id}/retry` | Owner only |
 
@@ -92,7 +93,11 @@ This version uses a static React frontend, a small Worker API and D1 for databas
 
 Cloudflare Free includes 100,000 Worker requests/day, 5 million D1 rows read/day, 100,000 rows written/day, and **500 MB per D1 database**. All private files and retained versions count toward storage. Static asset requests are free. Stay on Workers Free and avoid paid add-ons. Exhausting D1 Free quotas causes errors instead of automatic paid overages. Platform terms and quotas can change; free hosting is not an uptime guarantee.
 
-There is currently no automatic mail-retention cleanup. Review storage monthly with `npx wrangler d1 info shortlist-db --json`. A future retention policy can archive/remove portal copies of completed or ignored mail bodies and attachments after 30 days, while preserving the student master, published shortlist versions, receipt dates, source metadata and duplicate-detection hashes. Pending, processing and review sources must remain available. Cleanup must handle shared/referenced uploads and mark archived sources explicitly so retries and audit links do not silently break. The collector does not delete messages from the IITK mailbox.
+Cloudflare runs automatic mail cleanup **hourly**. Only jobs marked **completed (`done`) at least seven full days ago** are eligible, using their stable `completed_at` timestamp rather than email receipt/import/rescan dates. The cleanup deletes portal copies of the email body/links, superseded source JSON and attachment bytes. It never deletes or modifies any shortlist, draft/version history or student master. Pending, processing, review and ignored jobs remain intact. Mail attachments shared with an unfinished job or unpublished draft are retained until those references are resolved; later runs revisit them. Manually uploaded files are outside this policy. Original messages in the IITK mailbox are never deleted.
+
+Receipt dates, result links, processing notes, source IDs and duplicate hashes remain as a small audit record, preventing rescans from recreating cleaned messages or changing **Date added**. Cleaned jobs show `source_deleted_at` and retain their prepared results; deleted attachment downloads return HTTP 410 and no longer appear among available uploads. An atomic database guard prevents drafts being saved against an attachment deleted during source validation. Historical completed jobs use their last recorded update time as the conservative initial completion time.
+
+The private `/mail` page shows the policy and last cleanup time. `POST /api/v1/mail/cleanup` with `{}` runs the same fixed policy immediately for the owner; uploader keys cannot invoke cleanup or change its age/scope. This maintenance schedule runs on Cloudflare independently of ChatGPT tasks, browser sessions and mailbox sync settings. Runs are bounded to ten source jobs and twenty attachments, with a lease preventing overlap; any backlog continues on the next hourly run. `GET /api/v1/mail/status` includes the latest cleanup result. Review overall storage with `npx wrangler d1 info shortlist-db --json`.
 
 Workers Free has a 10 ms CPU limit per invocation. Spreadsheet parsing runs in the browser and matching runs in the external agent. Large imports or heavy traffic may still hit limits: verify the actual master and sample files on the live deployment. The application's 10 MiB upload cap is not a performance guarantee.
 
