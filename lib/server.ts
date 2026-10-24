@@ -72,7 +72,7 @@ async function masterRows(master: Master) {
   return object.json<StudentRow[]>();
 }
 async function findList(listId: string) {
-  const list = await db().prepare('SELECT * FROM shortlists WHERE id = ?').bind(listId).first<List>();
+  const list = await db().prepare('SELECT * FROM shortlists WHERE id = ? AND deleted_at IS NULL').bind(listId).first<List>();
   if (!list) throw new InputError('Shortlist not found.', 404); return list;
 }
 async function findVersion(versionId: string, listId: string) {
@@ -121,8 +121,8 @@ async function createDraft(request: Request, listId?: string) {
     number = (latest?.number || 0) + 1;
   } else {
     list = { id: id(), company: string(input.company, 'Company', 120, true), role: string(input.role, 'Role', 180, true), round: string(input.round, 'Round', 80, true), season: string(input.season, 'Season', 40, true), notes: string(input.notes, 'Public notes', 1500), created_at: now(), updated_at: now(), published_version_id: null };
-    const duplicate = await db().prepare('SELECT id FROM shortlists WHERE lower(company) = lower(?) AND lower(role) = lower(?) AND lower(round) = lower(?) AND lower(season) = lower(?)').bind(list.company, list.role, list.round, list.season).first<{ id: string }>();
-    if (duplicate) return json({ error: 'This company, role, round and season already exist. Create a new version instead.', shortlist_id: duplicate.id }, 409);
+    const duplicate = await db().prepare('SELECT id, deleted_at FROM shortlists WHERE lower(company) = lower(?) AND lower(role) = lower(?) AND lower(round) = lower(?) AND lower(season) = lower(?)').bind(list.company, list.role, list.round, list.season).first<{ id: string; deleted_at: string | null }>();
+    if (duplicate) return json({ error: duplicate.deleted_at ? 'This shortlist was deleted. Ask the owner to restore it before creating a new version.' : 'This company, role, round and season already exist. Create a new version instead.', shortlist_id: duplicate.id }, 409);
   }
   const versionId = id(), createdAt = now(), key = `shortlists/${list.id}/${versionId}.json`;
   await bucket().put(key, JSON.stringify(rows), { httpMetadata: { contentType: 'application/json' } });
@@ -150,12 +150,26 @@ async function publish(request: Request, listId: string, restore = false) {
   if (warnings.length && input.acknowledge_warnings !== true) throw new InputError('Review the draft warnings and set acknowledge_warnings to true before publication.');
   const time = now();
   const [changed] = await db().batch([
-    db().prepare('UPDATE shortlists SET published_version_id = ?, updated_at = ? WHERE id = ? AND published_version_id IS ?').bind(version.id, time, listId, list.published_version_id),
+    db().prepare('UPDATE shortlists SET published_version_id = ?, updated_at = ? WHERE id = ? AND published_version_id IS ? AND deleted_at IS NULL').bind(version.id, time, listId, list.published_version_id),
     db().prepare('UPDATE versions SET published_at = coalesce(published_at, ?) WHERE id = ? AND EXISTS (SELECT 1 FROM shortlists WHERE id = ? AND published_version_id = ?)').bind(time, version.id, listId, version.id),
   ]);
   if (changed.meta.changes !== 1) throw new InputError('Another publisher changed this shortlist. Refresh and retry.', 409);
   await log(restore ? 'version_restored' : 'version_published', user.id, version.id);
   return json({ shortlist_id: listId, version_id: version.id, published: true, public_url: `${new URL(request.url).origin}/?list=${listId}`, row_count: version.row_count });
+}
+
+async function deleteShortlist(request: Request, listId: string, restore = false) {
+  const owner = await access(request, true), input = await body(request);
+  const expected = string(input.expected_updated_at, 'expected_updated_at', 80, true);
+  const list = await db().prepare('SELECT id, updated_at, deleted_at FROM shortlists WHERE id = ?').bind(listId).first<{ id: string; updated_at: string; deleted_at: string | null }>();
+  if (!list) throw new InputError('Shortlist not found.', 404);
+  if (restore ? !list.deleted_at : !!list.deleted_at) throw new InputError(restore ? 'This shortlist has already been restored.' : 'This shortlist has already been deleted.', 409);
+  const time = now();
+  const result = await db().prepare(`UPDATE shortlists SET deleted_at = ?, deleted_by = ?, updated_at = ? WHERE id = ? AND updated_at = ? AND deleted_at IS ${restore ? 'NOT NULL' : 'NULL'}`)
+    .bind(restore ? null : time, restore ? null : owner.id, time, listId, expected).run();
+  if (result.meta.changes !== 1) throw new InputError('This shortlist changed. Refresh and review it before trying again.', 409);
+  await log(restore ? 'shortlist_restored' : 'shortlist_deleted', owner.id, listId);
+  return json({ shortlist_id: listId, deleted: !restore, updated_at: time });
 }
 
 export async function handle(request: Request): Promise<Response> {
@@ -222,11 +236,18 @@ export async function handle(request: Request): Promise<Response> {
       }
     }
     if (resource === 'shortlists') {
-      if (method === 'GET' && !item) {
-        const drafts = url.searchParams.get('include_drafts') === '1'; if (drafts) await access(request);
-        const result = await db().prepare(`SELECT s.*, v.row_count, v.number AS version_number, v.published_at, (SELECT count(*) FROM versions WHERE shortlist_id = s.id) AS version_count FROM shortlists s LEFT JOIN versions v ON v.id = s.published_version_id ${drafts ? '' : 'WHERE s.published_version_id IS NOT NULL'} ORDER BY s.updated_at DESC`).all();
+      if (method === 'GET' && item === 'deleted' && !action) {
+        await access(request, true);
+        const result = await db().prepare('SELECT s.*, v.row_count, v.number AS version_number, (SELECT count(*) FROM versions WHERE shortlist_id = s.id) AS version_count FROM shortlists s LEFT JOIN versions v ON v.id = s.published_version_id WHERE s.deleted_at IS NOT NULL ORDER BY s.deleted_at DESC').all();
         return json({ shortlists: result.results });
       }
+      if (method === 'GET' && !item) {
+        const drafts = url.searchParams.get('include_drafts') === '1'; if (drafts) await access(request);
+        const result = await db().prepare(`SELECT s.*, v.row_count, v.number AS version_number, v.published_at, (SELECT count(*) FROM versions WHERE shortlist_id = s.id) AS version_count FROM shortlists s LEFT JOIN versions v ON v.id = s.published_version_id WHERE s.deleted_at IS NULL ${drafts ? '' : 'AND s.published_version_id IS NOT NULL'} ORDER BY s.updated_at DESC`).all();
+        return json({ shortlists: result.results });
+      }
+      if (method === 'DELETE' && item && !action) return await deleteShortlist(request, item);
+      if (method === 'POST' && item && action === 'undelete') return await deleteShortlist(request, item, true);
       if (method === 'POST' && !item) return await createDraft(request);
       if (method === 'POST' && action === 'versions') return await createDraft(request, item);
       if (method === 'POST' && action === 'publish') return await publish(request, item);
@@ -256,15 +277,19 @@ export async function handle(request: Request): Promise<Response> {
 
 function openapi(origin: string) {
   const secured = [{ UploaderKey: [] }];
+  const ownerOnly = [{ OwnerKey: [] }];
   const student = { type: 'object', additionalProperties: false, required: COLUMNS, properties: Object.fromEntries(COLUMNS.map(key => [key, key === 'cpi' ? { type: ['number', 'null'], minimum: 0, maximum: 10 } : { type: 'string' }])) };
-  const response = { '200': { description: 'Success' }, '400': { description: 'Invalid input' }, '401': { description: 'Access key or owner session required' }, '409': { description: 'Concurrent update or duplicate shortlist' } };
+  const response = { '200': { description: 'Success' }, '400': { description: 'Invalid input' }, '401': { description: 'Access key or owner session required' }, '403': { description: 'Owner access required' }, '404': { description: 'Not found or deleted' }, '409': { description: 'Concurrent update or duplicate shortlist' } };
   const draft = { type: 'object', properties: { company: { type: 'string' }, role: { type: 'string' }, round: { type: 'string' }, season: { type: 'string' }, master_id: { type: 'string' }, rows: { type: 'array', items: student }, csv_text: { type: 'string' }, processing_notes: { type: 'string' }, source_upload_ids: { type: 'array', items: { type: 'string' } }, expected_latest_version_id: { type: ['string', 'null'] } }, required: ['master_id'] };
   const bodySchema = (schema: unknown) => ({ required: true, content: { 'application/json': { schema } } });
   const parameter = { name: 'id', in: 'path', required: true, schema: { type: 'string' } };
-  return { openapi: '3.1.0', info: { title: 'Shortlist Desk', version: '1.0.0', description: 'Gemini performs interpretation and merging. The portal validates, stores and publishes exact six-column results.' }, servers: [{ url: origin + '/api/v1' }], components: { securitySchemes: { UploaderKey: { type: 'http', scheme: 'bearer', description: 'Revocable uploader key issued by the owner.' } }, schemas: { Student: student } }, paths: {
+  const deleteBody = bodySchema({ type: 'object', required: ['expected_updated_at'], properties: { expected_updated_at: { type: 'string', description: 'updated_at from the latest shortlist metadata, to reject stale changes.' } } });
+  return { openapi: '3.1.0', info: { title: 'Shortlist Desk', version: '1.0.0', description: 'Gemini performs interpretation and merging. The portal validates, stores and publishes exact six-column results.' }, servers: [{ url: origin + '/api/v1' }], components: { securitySchemes: { UploaderKey: { type: 'http', scheme: 'bearer', description: 'Revocable uploader key issued by the owner.' }, OwnerKey: { type: 'http', scheme: 'bearer', description: 'Private owner key. Uploader keys cannot delete or restore shortlists.' } }, schemas: { Student: student } }, paths: {
     '/health': { get: { operationId: 'health', summary: 'Health check', responses: response } },
     '/shortlists': { get: { operationId: 'listShortlists', summary: 'List published shortlists', parameters: [{ name: 'include_drafts', in: 'query', schema: { type: 'integer', enum: [1] }, description: 'Requires authentication when set.' }], responses: response }, post: { operationId: 'createShortlistDraft', summary: 'Create a shortlist and its first draft', security: secured, requestBody: bodySchema(draft), responses: { ...response, '201': { description: 'Draft created; not public until published' } } } },
-    '/shortlists/{id}': { parameters: [parameter], get: { operationId: 'readShortlist', summary: 'Read current published six-column rows', responses: response } },
+    '/shortlists/{id}': { parameters: [parameter], get: { operationId: 'readShortlist', summary: 'Read current published six-column rows', responses: response }, delete: { operationId: 'deleteShortlist', summary: 'Owner only: hide a shortlist and retain its versions for recovery', security: ownerOnly, requestBody: deleteBody, responses: response } },
+    '/shortlists/deleted': { get: { operationId: 'listDeletedShortlists', summary: 'Owner only: list deleted shortlists', security: ownerOnly, responses: response } },
+    '/shortlists/{id}/undelete': { parameters: [parameter], post: { operationId: 'undeleteShortlist', summary: 'Owner only: restore a deleted shortlist and its previous publication', security: ownerOnly, requestBody: deleteBody, responses: response } },
     '/shortlists/{id}/export.csv': { parameters: [parameter], get: { operationId: 'downloadShortlist', summary: 'Download published CSV', responses: response } },
     '/shortlists/{id}/versions': { parameters: [parameter], get: { operationId: 'listVersions', security: secured, responses: response }, post: { operationId: 'createVersion', security: secured, requestBody: bodySchema(draft), responses: response } },
     '/shortlists/{id}/publish': { parameters: [parameter], post: { operationId: 'publishVersion', security: secured, requestBody: bodySchema({ type: 'object', required: ['version_id', 'expected_current_version_id'], properties: { version_id: { type: 'string' }, expected_current_version_id: { type: ['string', 'null'] }, acknowledge_warnings: { type: 'boolean' } } }), responses: response } },

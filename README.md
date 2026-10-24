@@ -53,7 +53,9 @@ Open `/admin` on the new site and sign in with that key. Import your reviewed si
 
 This repository is configured for the owner's existing Cloudflare database. When deploying a fork to another account, reset `database_id` in `wrangler.jsonc` to `00000000-0000-0000-0000-000000000000` before running setup, so it creates a database in that account.
 
-Create a separate, expiring uploader key in Owner settings for Gemini. Uploader keys can read the private master, store originals, create drafts and publish. They cannot replace the master, manage access or restore versions. Revocation applies on subsequent requests, including existing browser sessions.
+Create a separate, expiring uploader key in Owner settings for Gemini. Uploader keys can read the private master, store originals, create drafts and publish. They cannot replace the master, manage access, restore versions, or delete and restore shortlists. Revocation applies on subsequent requests, including existing browser sessions.
+
+Owner settings includes **Manage shortlists** for both published lists and private drafts. **Delete shortlist** removes a list from the public library, direct links, exports and the upload workspace. Its versions are retained privately. Expand **Deleted shortlists** to restore it, including its previous publication state. Restoring a previously published list makes that version public again. These controls are available only to the owner.
 
 **The previous hosted site's data is not automatically migrated.** Import the local reviewed master into the new deployment. No actual student records or company shortlists are bundled here. Test the sample company files after deployment.
 
@@ -97,11 +99,14 @@ Base: `https://YOUR-SITE/api/v1`. Protected endpoints accept `Authorization: Bea
 | GET, POST | `/shortlists/{id}/versions` | Owner/uploader |
 | POST | `/shortlists/{id}/publish` | Owner/uploader |
 | POST | `/shortlists/{id}/restore` | Owner only |
+| DELETE | `/shortlists/{id}` | Owner only; recoverable deletion |
+| GET | `/shortlists/deleted` | Owner only; deleted-list metadata |
+| POST | `/shortlists/{id}/undelete` | Owner only; recover deleted list |
 | PUT | `/master` | Owner only |
 | GET, POST, DELETE | `/keys`, `/keys/{id}` | Owner only |
 | POST, DELETE | `/session` | Key sign-in/sign-out |
 
-Version endpoints require expected concurrency IDs to prevent stale updates. Drafts stay private until explicitly published. A draft can link up to 20 private source uploads. Keys belong in headers or the login form, never URLs or public notes. Untrusted identity/email headers grant no owner access. Browser cookies are HttpOnly, SameSite=Strict and Secure on HTTPS; cookie-authenticated writes require the portal's origin.
+Version endpoints require expected concurrency IDs to prevent stale updates. Deletion and recovery require a JSON body containing `expected_updated_at` from the latest list metadata; stale changes return 409. Deleted versions cannot be read or republished until the owner restores the list. A new list cannot reuse a deleted list's company/role/round/season identity; restore the existing list first. Drafts stay private until explicitly published. A draft can link up to 20 private source uploads. Keys belong in headers or the login form, never URLs or public notes. Untrusted identity/email headers grant no owner access. Browser cookies are HttpOnly, SameSite=Strict and Secure on HTTPS; cookie-authenticated writes require the portal's origin.
 
 ## Local development and checks
 
@@ -120,6 +125,6 @@ npm run build
 npm run test:integration
 ```
 
-Integration checks start an isolated local Worker/D1 on port 8788 and clean up afterward. They cover authentication, spoofed identity headers, multi-chunk private files, six-column validation, drafts, publishing, version conflicts, restoration, CSRF and revoked keys, using synthetic records only. They do not verify Cloudflare account permissions, production CPU enforcement or Gemini's ability to operate the deployed site.
+Integration checks start an isolated local Worker/D1 on port 8788 and clean up afterward. They cover authentication, spoofed identity headers, multi-chunk private files, six-column validation, drafts, publishing, version conflicts, restoration, owner-only deletion, deleted export denial, stale deletion rejection, deleted-list recovery, CSRF and revoked keys, using synthetic records only. They do not verify Cloudflare account permissions, production CPU enforcement or Gemini's ability to operate the deployed site.
 
 All setup, backup and test helpers live in `.helper/`. Builds, secrets, local databases, backups, student files and company samples are ignored by Git. The public repository contains source and synthetic fixtures only.

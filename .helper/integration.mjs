@@ -81,9 +81,44 @@ await call(`shortlists/${draft.shortlist_id}/publish`, { method: 'POST', key: tr
 await call(`shortlists/${draft.shortlist_id}/restore`, { method: 'POST', key: true, data: { version_id: draft.version_id, expected_current_version_id: v2.version_id }, expected: 403 });
 await call(`shortlists/${draft.shortlist_id}/restore`, { method: 'POST', owner: true, data: { version_id: draft.version_id, expected_current_version_id: v2.version_id } });
 assert.equal((await call('shortlists/' + draft.shortlist_id)).result.rows.length, 2);
+const listPath = 'shortlists/' + draft.shortlist_id;
+const current = (await call(listPath)).result.shortlist;
+await call(listPath, { method: 'DELETE', data: { expected_updated_at: current.updated_at }, expected: 401 });
+await call(listPath, { method: 'DELETE', key: true, data: { expected_updated_at: current.updated_at }, expected: 403 });
+await call(listPath, { method: 'DELETE', owner: true, evil: true, data: { expected_updated_at: current.updated_at }, expected: 403 });
+await call(listPath, { method: 'DELETE', owner: true, data: {}, expected: 400 });
+await call(listPath, { method: 'DELETE', owner: true, data: { expected_updated_at: 'stale' }, expected: 409 });
+const removed = (await call(listPath, { method: 'DELETE', owner: true, data: { expected_updated_at: current.updated_at } })).result;
+assert.equal(removed.deleted, true);
+await call(listPath, { expected: 404 });
+await call(listPath + '/export.csv', { expected: 404 });
+await call(listPath + '?version_id=' + draft.version_id, { owner: true, expected: 404 });
+await call(listPath + '/versions', { key: true, expected: 404 });
+await call(listPath + '/versions', { method: 'POST', key: true, data: { ...v2data, expected_latest_version_id: v2.version_id }, expected: 404 });
+await call(listPath + '/publish', { method: 'POST', key: true, data: { version_id: draft.version_id, expected_current_version_id: draft.version_id }, expected: 404 });
+assert.equal((await call('shortlists')).result.shortlists.some(list => list.id === draft.shortlist_id), false);
+assert.equal((await call('shortlists?include_drafts=1', { key: true })).result.shortlists.some(list => list.id === draft.shortlist_id), false);
+await call('shortlists/deleted', { expected: 401 });
+await call('shortlists/deleted', { key: true, expected: 403 });
+const trash = (await call('shortlists/deleted', { owner: true })).result.shortlists;
+assert.equal(trash.find(list => list.id === draft.shortlist_id)?.version_count, 2);
+await call('shortlists', { method: 'POST', key: true, data: input, expected: 409 });
+await call(listPath + '/undelete', { method: 'POST', key: true, data: { expected_updated_at: removed.updated_at }, expected: 403 });
+await call(listPath + '/undelete', { method: 'POST', owner: true, data: { expected_updated_at: current.updated_at }, expected: 409 });
+await call(listPath + '/undelete', { method: 'POST', owner: true, data: { expected_updated_at: removed.updated_at } });
+await call(listPath + '/undelete', { method: 'POST', owner: true, data: { expected_updated_at: removed.updated_at }, expected: 409 });
+assert.deepEqual((await call(listPath)).result.rows, rows);
+assert.equal((await call('shortlists/deleted', { owner: true })).result.shortlists.length, 0);
+// Private drafts can also be deleted and restored without becoming public.
+const privateDraft = (await call('shortlists', { method: 'POST', key: true, data: { ...input, company: input.company + ' private' }, expected: 201 })).result;
+const privateList = (await call('shortlists?include_drafts=1', { owner: true })).result.shortlists.find(list => list.id === privateDraft.shortlist_id);
+const privateRemoved = (await call('shortlists/' + privateList.id, { method: 'DELETE', owner: true, data: { expected_updated_at: privateList.updated_at } })).result;
+await call('shortlists/' + privateList.id + '/undelete', { method: 'POST', owner: true, data: { expected_updated_at: privateRemoved.updated_at } });
+await call('shortlists/' + privateList.id, { expected: 404 });
+assert.equal((await call('shortlists?include_drafts=1', { owner: true })).result.shortlists.some(list => list.id === privateList.id), true);
 await call('keys/' + key.id, { method: 'DELETE', owner: true });
 await call('master', { key: true, expected: 401 });
-console.log(JSON.stringify({ passed: true, http_checks: count, all_records_synthetic: true, checked: ['private master', 'anonymous write denial', 'uploader scopes', 'private source files', 'six columns', 'draft privacy', 'publication', 'CSV', 'version conflicts', 'restore', 'key revocation', 'CSRF'] }, null, 2));
+console.log(JSON.stringify({ passed: true, http_checks: count, all_records_synthetic: true, checked: ['private master', 'anonymous write denial', 'uploader scopes', 'private source files', 'six columns', 'draft privacy', 'publication', 'CSV', 'version conflicts', 'restore', 'owner-only deletion', 'deleted export denial', 'stale deletion rejection', 'deleted shortlist recovery', 'private draft recovery', 'key revocation', 'CSRF'] }, null, 2));
 
 } finally {
   server.kill('SIGTERM');
