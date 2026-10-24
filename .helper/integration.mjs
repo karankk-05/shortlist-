@@ -345,9 +345,54 @@ assert.equal(cronRun.status, 200, 'Local Cloudflare scheduled handler must execu
 const finalRetentionState = (await call('mail/status', { owner: true })).result.retention.last_run;
 assert.equal(finalRetentionState.status, 'ok'); assert.equal(finalRetentionState.jobs_cleaned, 0);
 
+// Company/round grouping is a server-owned read view; uploaded event identities stay intact.
+const groupCompany = input.company + ' Display';
+const groupingSources = [
+  { company: groupCompany + ' Ltd.', role: 'Hardware', round: 'Technical Test', date: '2026-10-10T00:00:00.000Z' },
+  { company: groupCompany.toLowerCase() + ' Private Limited', role: 'Hardware', round: 'Online Aptitude Test — 25 October 2026, 1:30 PM', date: '2026-10-25T00:00:00.000Z' },
+  { company: groupCompany, role: 'Developer', round: 'GD', date: '2026-10-12T00:00:00.000Z' },
+  { company: groupCompany, role: 'Analyst', round: 'Group Discussion', date: '2026-10-11T00:00:00.000Z' },
+  { company: groupCompany, role: 'Developer', round: 'Technical Interview', date: '2026-10-13T00:00:00.000Z' },
+  { company: input.company + ' Other company', role: 'Developer', round: 'Test', date: '2026-10-24T00:00:00.000Z' },
+];
+const groupingPublished = [];
+for (const source of groupingSources) {
+  const draft = (await call('shortlists', { method: 'POST', key: true, data: { ...input, company: source.company, role: source.role, round: source.round }, expected: 201 })).result;
+  await call(`shortlists/${draft.shortlist_id}/publish`, { method: 'POST', key: true, data: { version_id: draft.version_id, expected_current_version_id: null, acknowledge_warnings: true } });
+  groupingPublished.push({ ...draft, source });
+}
+retentionSql(groupingPublished.map(draft => `UPDATE versions SET created_at = ${sqlText(draft.source.date)} WHERE id = ${sqlText(draft.version_id)};`).join('\n'));
+const groupingHidden = (await call('shortlists', { method: 'POST', key: true, data: { ...input, company: groupCompany, role: 'Private role', round: 'HR interview' }, expected: 201 })).result;
+const rawIndex = (await call('shortlists')).result;
+assert.equal(rawIndex.company_groups, undefined, 'Existing flat API contract stays unchanged');
+const groupedIndex = (await call('shortlists?grouped=1')).result;
+assert.deepEqual(groupedIndex.shortlists, rawIndex.shortlists);
+const companyGroup = groupedIndex.company_groups.find(group => group.shortlists.some(list => list.id === groupingPublished[0].shortlist_id));
+assert.equal(companyGroup.shortlists.length, 5, 'Legal suffix/case aliases must group across roles and dates');
+assert.equal(companyGroup.added_at, '2026-10-25T00:00:00.000Z');
+assert.equal(companyGroup.shortlists.filter(list => list.round_categories.includes('Test')).length, 2);
+assert.equal(companyGroup.shortlists.filter(list => list.round_categories.includes('Group Discussion')).length, 2);
+assert.equal(companyGroup.shortlists.filter(list => list.round_categories.includes('Interview')).length, 1);
+for (const draft of groupingPublished.slice(0, 5)) {
+  const member = companyGroup.shortlists.find(list => list.id === draft.shortlist_id);
+  assert.equal(member.company, draft.source.company); assert.equal(member.role, draft.source.role); assert.equal(member.round, draft.source.round); assert.equal(member.added_at, draft.source.date);
+}
+const otherCompanyGroup = groupedIndex.company_groups.find(group => group.shortlists.some(list => list.id === groupingPublished[5].shortlist_id));
+assert.ok(groupedIndex.company_groups.indexOf(companyGroup) < groupedIndex.company_groups.indexOf(otherCompanyGroup), 'Companies are ordered by their latest Date added');
+const groupedIds = groupedIndex.company_groups.flatMap(group => group.shortlists.map(list => list.id));
+assert.equal(groupedIds.includes(groupingHidden.shortlist_id), false);
+assert.deepEqual([...groupedIds].sort(), rawIndex.shortlists.map(list => list.id).sort(), 'Every public list appears exactly once');
+assert.equal(groupedIndex.round_categories.filter(category => category === 'Test').length, 1);
+assert.equal(groupedIndex.round_categories.includes('Technical Test'), false);
+assert.equal(groupedIndex.round_categories.includes('Group Discussion'), true);
+assert.deepEqual((await call('shortlists')).result, rawIndex, 'Grouping does not change stored identities, values or dates');
+await call('shortlists?include_drafts=1&grouped=1', { expected: 401 });
+const privateGroups = (await call('shortlists?include_drafts=1&grouped=1', { key: true })).result;
+assert.ok(privateGroups.company_groups.some(group => group.shortlists.some(list => list.id === groupingHidden.shortlist_id)), 'Authorized draft index still works');
+
 await call('keys/' + key.id, { method: 'DELETE', owner: true });
 await call('master', { key: true, expected: 401 });
-console.log(JSON.stringify({ passed: true, http_checks: count, all_records_synthetic: true, checked: ['private master', 'anonymous write denial', 'uploader scopes', 'private source files', 'six columns', 'draft privacy', 'publication', 'CSV', 'version conflicts', 'restore', 'owner-only deletion', 'deleted export denial', 'stale deletion rejection', 'deleted shortlist recovery', 'private draft recovery', 'private mail ingestion', 'mail attachment storage', 'duplicate message detection', 'unapproved links', 'exclusive job claims', 'lease expiry and crash recovery', 'mail result publication', 'review and owner retry', 'seven-day completed-only retention', 'shared attachment protection', 'exact shortlist/master byte preservation', 'source deletion audit markers', 'retention idempotency', 'cron handler', 'key revocation', 'CSRF'] }, null, 2));
+console.log(JSON.stringify({ passed: true, http_checks: count, all_records_synthetic: true, checked: ['private master', 'anonymous write denial', 'uploader scopes', 'private source files', 'six columns', 'draft privacy', 'publication', 'CSV', 'version conflicts', 'restore', 'owner-only deletion', 'deleted export denial', 'stale deletion rejection', 'deleted shortlist recovery', 'private draft recovery', 'private mail ingestion', 'mail attachment storage', 'duplicate message detection', 'unapproved links', 'exclusive job claims', 'lease expiry and crash recovery', 'mail result publication', 'review and owner retry', 'seven-day completed-only retention', 'shared attachment protection', 'exact shortlist/master byte preservation', 'source deletion audit markers', 'retention idempotency', 'cron handler', 'server-owned company grouping', 'round alias categories', 'unchanged flat API and source event identities', 'grouped draft privacy', 'key revocation', 'CSRF'] }, null, 2));
 
 } finally {
   server.kill('SIGTERM');

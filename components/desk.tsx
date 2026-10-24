@@ -5,6 +5,7 @@ import { COLUMNS, StudentRow, validateRows } from '@/lib/records';
 import { agentGuide } from '@/lib/agent-guide';
 import MailWorkspace from './mail-workspace';
 import { EMPTY_STUDENT_FILTERS, cpiRangeError, studentBatch, viewStudents, type StudentFilters, type StudentSort, type SortDirection } from '@/lib/student-view';
+import type { CompanyGroup } from '@/lib/shortlist-groups';
 
 type View = 'library' | 'upload' | 'guide' | 'admin' | 'mail';
 type Session = { role: 'public' | 'uploader' | 'admin'; label: string | null; owner_configured: boolean };
@@ -153,15 +154,17 @@ function StudentTable({ rows }: { rows: StudentRow[] }) {
 export default function Desk({ initialView }: { initialView: View }) {
   const [session, setSession] = useState<Session>({ role: 'public', label: null, owner_configured: true });
   const [lists, setLists] = useState<Listing[]>([]), [loading, setLoading] = useState(true), [error, setError] = useState('');
+  const [companyGroups, setCompanyGroups] = useState<CompanyGroup<Listing>[]>([]), [roundCategories, setRoundCategories] = useState<string[]>([]);
   const [detail, setDetail] = useState<{ shortlist: Listing; rows: StudentRow[]; version: Version } | null>(null);
   const [query, setQuery] = useState(''), [round, setRound] = useState(''), [origin, setOrigin] = useState('');
   const refresh = useCallback(async () => {
-    try { const [me, result] = await Promise.all([api<Session>('me'), api('shortlists')]); setSession(me); setLists(result.shortlists); setError(''); }
+    try { const [me, result] = await Promise.all([api<Session>('me'), api('shortlists?grouped=1')]); setSession(me); setLists(result.shortlists); setCompanyGroups(result.company_groups); setRoundCategories(result.round_categories); setError(''); }
     catch (error) { setError((error as Error).message); } finally { setLoading(false); }
   }, []);
   useEffect(() => { setOrigin(location.origin); refresh(); const list = new URLSearchParams(location.search).get('list'); if (list && initialView === 'library') api('shortlists/' + encodeURIComponent(list)).then(setDetail).catch(error => setError(error.message)); }, [refresh, initialView]);
   const authorised = session.role !== 'public';
-  const shown = lists.filter(list => (!round || list.round === round) && (!query || [list.company, list.role, list.season].some(value => value.toLowerCase().includes(query.toLowerCase()))));
+  const search = query.trim().toLowerCase();
+  const shownGroups = companyGroups.map(group => ({ ...group, total: group.shortlists.length, shortlists: group.shortlists.filter(list => (!round || list.round_categories.includes(round)) && (!search || [group.company, list.company, list.role, list.season, list.round, ...list.round_categories].some(value => value.toLowerCase().includes(search)))) })).filter(group => group.shortlists.length);
   const heading = (title: string, eyebrow: string, subtitle: string, action?: ReactNode) => <div className="heading-row"><div>{eyebrow && <div className="eyebrow">{eyebrow}</div>}<h1>{title}</h1>{subtitle && <p className="lede">{subtitle}</p>}</div>{action}</div>;
   const brand = <a className="brand" href="/"><span className="brandmark"><Layers size={22} strokeWidth={1.6} /></span><span><strong>shortlist desk</strong><small>IIT KANPUR</small></span></a>;
   return <div className={'shell' + (authorised ? '' : ' public-shell')}>
@@ -184,11 +187,20 @@ export default function Desk({ initialView }: { initialView: View }) {
           <div className="stat"><span className="stat-icon"><CheckCircle2 size={19} /></span><div><div className="stat-number small">{loading ? '—' : lists.length ? date(lists[0].added_at) : '—'}</div><span className="stat-label">Latest addition</span></div></div>
         </section>
         <section className="panel" aria-label="Company shortlists">
-          <div className="toolbar"><label className="search"><Search size={15} /><input aria-label="Search companies" placeholder="Search company or position…" value={query} onChange={e => setQuery(e.target.value)} /></label><select aria-label="Filter by round" value={round} onChange={e => setRound(e.target.value)}><option value="">All rounds</option>{[...new Set(lists.map(list => list.round))].map(value => <option key={value}>{value}</option>)}</select></div>
-          {loading ? <div className="loading"><Busy /> Loading shortlists…</div> : lists.length === 0 ? <div className="empty"><h3>No shortlists yet.</h3></div> : <div className="table-wrap"><table><thead><tr><th>Company</th><th>Position</th><th>Round</th><th>Students</th><th>Date added</th><th></th></tr></thead><tbody>
-            {shown.map(list => <tr className="clickable" key={list.id} onClick={() => { location.href = '/?list=' + list.id; }}><td><a href={'/?list=' + list.id} className="company-cell"><span className="company-logo">{list.company[0]}</span><span><span className="company-name">{list.company}</span><div className="subtle">{list.season}</div></span></a></td><td>{list.role}</td><td><span className="pill">{list.round}</span></td><td>{format(list.row_count || 0)}</td><td className="muted">{date(list.added_at)}</td><td><ArrowRight size={15} color="#7d906f" /></td></tr>)}
-            {!shown.length && <tr><td colSpan={6} className="muted">No shortlists match your search.</td></tr>}
-          </tbody></table></div>}
+          <div className="toolbar"><label className="search"><Search size={15} /><input aria-label="Search companies" placeholder="Search company or position…" value={query} onChange={e => setQuery(e.target.value)} /></label><select aria-label="Filter by round" value={round} onChange={e => setRound(e.target.value)}><option value="">All rounds</option>{roundCategories.map(value => <option key={value}>{value}</option>)}</select></div>
+          {loading ? <div className="loading"><Busy /> Loading shortlists…</div> : lists.length === 0 ? <div className="empty"><h3>No shortlists yet.</h3></div> : <div className="company-groups">
+            {shownGroups.map(group => <section className="company-group" key={group.key} aria-label={group.company + ' shortlists'}>
+              <header className="company-group-heading"><span className="company-logo">{group.company[0]}</span><h2>{group.company}</h2><span className="company-group-count">{group.shortlists.length === group.total ? format(group.total) : `${format(group.shortlists.length)} of ${format(group.total)}`} {group.total === 1 ? 'shortlist' : 'shortlists'}</span></header>
+              <div className="table-wrap"><table className="company-group-table"><thead><tr><th>Position</th><th>Round</th><th>Students</th><th>Date added</th><th></th></tr></thead><tbody>
+                {group.shortlists.map(list => <tr className="clickable" key={list.id} onClick={() => { location.href = '/?list=' + list.id; }}>
+                  <td><a className="shortlist-position" href={'/?list=' + list.id} aria-label={`${group.company}: ${list.role} — ${list.round}`}>{list.role}</a><div className="subtle">{list.season}</div></td>
+                  <td><div className="round-categories">{list.round_categories.map(category => <span className="pill" key={category}>{category}</span>)}</div>{(list.round_categories.length !== 1 || list.round.trim().toLowerCase() !== list.round_categories[0].toLowerCase()) && <div className="round-original">{list.round}</div>}</td>
+                  <td>{format(list.row_count || 0)}</td><td className="muted">{date(list.added_at)}</td><td><ArrowRight size={15} color="#7d906f" /></td>
+                </tr>)}
+              </tbody></table></div>
+            </section>)}
+            {!shownGroups.length && <p className="company-groups-empty muted">No shortlists match your search.</p>}
+          </div>}
         </section>
       </>}
       {initialView === 'library' && detail && <>

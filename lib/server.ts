@@ -5,6 +5,7 @@ import { mailGuide } from './mail-guide';
 import { mailConfig, mailHash, mailLease, mailStatus, saveMail, syncMail } from './mail-service';
 import { validateMailConfig } from './mail-content';
 import { cleanupMail, MAIL_RETENTION_DAYS } from './mail-retention';
+import { groupShortlists } from './shortlist-groups';
 import { COLUMNS, csvRows, InputError, sameShortlistRows, StudentRow, toCSV, validateRows } from './records';
 
 type Actor = { role: 'admin' | 'uploader'; id: string; label: string };
@@ -363,8 +364,8 @@ export async function handle(request: Request): Promise<Response> {
       }
       if (method === 'GET' && !item) {
         const drafts = url.searchParams.get('include_drafts') === '1'; if (drafts) await access(request);
-        const result = await db().prepare(`SELECT s.*, ${listAddedAt} AS added_at, v.row_count, v.number AS version_number, v.published_at, (SELECT count(*) FROM versions WHERE shortlist_id = s.id) AS version_count FROM shortlists s ${listVersionJoins} WHERE s.deleted_at IS NULL ${drafts ? '' : 'AND s.published_version_id IS NOT NULL'} ORDER BY added_at DESC, s.created_at DESC, s.id DESC`).all();
-        return json({ shortlists: result.results });
+        const result = await db().prepare(`SELECT s.*, ${listAddedAt} AS added_at, v.row_count, v.number AS version_number, v.published_at, (SELECT count(*) FROM versions WHERE shortlist_id = s.id) AS version_count FROM shortlists s ${listVersionJoins} WHERE s.deleted_at IS NULL ${drafts ? '' : 'AND s.published_version_id IS NOT NULL'} ORDER BY added_at DESC, s.created_at DESC, s.id DESC`).all<List & { added_at: string }>();
+        return json({ shortlists: result.results, ...(url.searchParams.get('grouped') === '1' ? groupShortlists(result.results) : {}) });
       }
       if (method === 'DELETE' && item && !action) return await deleteShortlist(request, item);
       if (method === 'POST' && item && action === 'undelete') return await deleteShortlist(request, item, true);
@@ -421,7 +422,7 @@ function openapi(origin: string) {
     '/mail-jobs/{id}/review': { parameters: [parameter], post: { operationId: 'reviewMailJob', summary: 'Leave an unresolved job for owner review; note is required', security: secured, requestBody: mailAction, responses: response } },
     '/mail-jobs/{id}/ignore': { parameters: [parameter], post: { operationId: 'ignoreMailJob', summary: 'Ignore an irrelevant claimed email with an explanation', security: secured, requestBody: mailAction, responses: response } },
     '/mail-jobs/{id}/retry': { parameters: [parameter], post: { operationId: 'retryMailJob', summary: 'Owner only: requeue a reviewed/ignored source', security: ownerOnly, responses: response } },
-    '/shortlists': { get: { operationId: 'listShortlists', summary: 'List published shortlists by added_at, newest first; mail results use the source mailbox receipt date', parameters: [{ name: 'include_drafts', in: 'query', schema: { type: 'integer', enum: [1] }, description: 'Requires authentication when set.' }], responses: response }, post: { operationId: 'createShortlistDraft', summary: 'Create a shortlist and its first draft', security: secured, requestBody: bodySchema(draft), responses: { ...response, '201': { description: 'Draft created; not public until published' } } } },
+    '/shortlists': { get: { operationId: 'listShortlists', summary: 'List published shortlists by added_at, newest first; optional server-generated company groups and round categories', parameters: [{ name: 'include_drafts', in: 'query', schema: { type: 'integer', enum: [1] }, description: 'Requires authentication when set.' }, { name: 'grouped', in: 'query', schema: { type: 'integer', enum: [1] }, description: 'Also return company_groups and normalized round_categories. Raw shortlists, original rounds and dates are preserved.' }], responses: response }, post: { operationId: 'createShortlistDraft', summary: 'Create a shortlist and its first draft', security: secured, requestBody: bodySchema(draft), responses: { ...response, '201': { description: 'Draft created; not public until published' } } } },
     '/shortlists/{id}': { parameters: [parameter], get: { operationId: 'readShortlist', summary: 'Read current published six-column rows', responses: response }, delete: { operationId: 'deleteShortlist', summary: 'Owner only: hide a shortlist and retain its versions for recovery', security: ownerOnly, requestBody: deleteBody, responses: response } },
     '/shortlists/deleted': { get: { operationId: 'listDeletedShortlists', summary: 'Owner only: list deleted shortlists', security: ownerOnly, responses: response } },
     '/shortlists/{id}/undelete': { parameters: [parameter], post: { operationId: 'undeleteShortlist', summary: 'Owner only: restore a deleted shortlist and its previous publication', security: ownerOnly, requestBody: deleteBody, responses: response } },

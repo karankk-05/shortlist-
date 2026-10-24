@@ -10,7 +10,7 @@
     "dev": "npm run build && wrangler d1 migrations apply DB --local && wrangler dev --local --port 8787",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test .helper/records.test.mjs .helper/student-view.test.mjs .helper/mail.test.mjs",
+    "test": "node --experimental-strip-types --test .helper/records.test.mjs .helper/student-view.test.mjs .helper/mail.test.mjs .helper/shortlist-groups.test.mjs",
     "test:integration": "node .helper/integration.mjs",
     "db:local": "wrangler d1 migrations apply DB --local",
     "db:remote": "wrangler d1 migrations apply DB --remote",
