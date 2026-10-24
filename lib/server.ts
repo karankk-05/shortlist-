@@ -257,7 +257,7 @@ export async function handle(request: Request): Promise<Response> {
     }
     if (resource === 'mail-jobs') {
       const user = await access(request);
-      const fields = 'id, subject, sender, received_at, status, note, duplicate_of, lease_until, result_version_ids, completed_at, source_deleted_at, created_at, updated_at';
+      const fields = 'id, subject, sender, received_at, status, note, owner_comment, duplicate_of, lease_until, result_version_ids, completed_at, source_deleted_at, created_at, updated_at';
       if (method === 'GET' && !item) {
         const status = url.searchParams.get('status') || 'pending';
         if (!['pending', 'processing', 'needs_review', 'done', 'ignored', 'all'].includes(status)) throw new InputError('Invalid mail job status.');
@@ -312,9 +312,20 @@ export async function handle(request: Request): Promise<Response> {
       }
       if (method === 'POST' && item && action === 'retry') {
         await access(request, true);
-        const result = await db().prepare("UPDATE mail_jobs SET status = 'pending', lease_hash = NULL, lease_until = NULL, claimed_by = NULL, updated_at = ? WHERE id = ? AND status IN ('needs_review','ignored')").bind(now(), item).run();
-        if (result.meta.changes !== 1) throw new InputError('Only a reviewed or ignored job can be retried.', 409);
+        const input = await body(request), comment = Object.hasOwn(input, 'comment') ? string(input.comment, 'Comment for agent', 2000) : null;
+        const expected = Object.hasOwn(input, 'expected_updated_at') ? string(input.expected_updated_at, 'expected_updated_at', 80, true) : null;
+        const result = await db().prepare("UPDATE mail_jobs SET status = 'pending', lease_hash = NULL, lease_until = NULL, claimed_by = NULL, owner_comment = coalesce(?, owner_comment), updated_at = ? WHERE id = ? AND status IN ('needs_review','ignored') AND (? IS NULL OR updated_at = ?)").bind(comment, now(), item, expected, expected).run();
+        if (result.meta.changes !== 1) throw new InputError('Only an unchanged reviewed or ignored job can be retried. Refresh the queue.', 409);
         await log('mail_job_retried', user.id, item); return json({ id: item, status: 'pending' });
+      }
+      if (method === 'PUT' && item && action === 'comment') {
+        await access(request, true);
+        const input = await body(request);
+        if (!Object.hasOwn(input, 'comment')) throw new InputError('Supply comment; use an empty string to clear it.');
+        const comment = string(input.comment, 'Comment for agent', 2000), expected = string(input.expected_updated_at, 'expected_updated_at', 80, true);
+        const result = await db().prepare("UPDATE mail_jobs SET owner_comment = ?, updated_at = ? WHERE id = ? AND status = 'pending' AND updated_at = ?").bind(comment, now(), item, expected).run();
+        if (result.meta.changes !== 1) throw new InputError('The job changed or has been claimed. Refresh before editing its comment.', 409);
+        await log('mail_owner_comment_saved', user.id, item); return json({ id: item, owner_comment: comment });
       }
       throw new InputError('Mail job endpoint not found.', 404);
     }
@@ -429,7 +440,8 @@ function openapi(origin: string) {
     '/mail-jobs/{id}/complete': { parameters: [parameter], post: { operationId: 'completeMailJob', summary: 'Complete a claimed job after every linked result is currently published', security: secured, requestBody: mailAction, responses: response } },
     '/mail-jobs/{id}/review': { parameters: [parameter], post: { operationId: 'reviewMailJob', summary: 'Leave an unresolved job for owner review; note is required', security: secured, requestBody: mailAction, responses: response } },
     '/mail-jobs/{id}/ignore': { parameters: [parameter], post: { operationId: 'ignoreMailJob', summary: 'Ignore an irrelevant claimed email with an explanation', security: secured, requestBody: mailAction, responses: response } },
-    '/mail-jobs/{id}/retry': { parameters: [parameter], post: { operationId: 'retryMailJob', summary: 'Owner only: requeue a reviewed/ignored source', security: ownerOnly, responses: response } },
+    '/mail-jobs/{id}/retry': { parameters: [parameter], post: { operationId: 'retryMailJob', summary: 'Owner only: requeue a reviewed/ignored source with an optional private comment for the agent', security: ownerOnly, requestBody: bodySchema({ type: 'object', properties: { comment: { type: 'string', maxLength: 2000 }, expected_updated_at: { type: 'string' } } }), responses: response } },
+    '/mail-jobs/{id}/comment': { parameters: [parameter], put: { operationId: 'saveMailOwnerComment', summary: 'Owner only: edit the comment on a pending job before it is claimed', security: ownerOnly, requestBody: bodySchema({ type: 'object', required: ['comment', 'expected_updated_at'], properties: { comment: { type: 'string', maxLength: 2000 }, expected_updated_at: { type: 'string' } } }), responses: response } },
     '/shortlists': { get: { operationId: 'listShortlists', summary: 'List published shortlists by added_at, newest first; optional server-generated company groups and round categories', parameters: [{ name: 'include_drafts', in: 'query', schema: { type: 'integer', enum: [1] }, description: 'Requires authentication when set.' }, { name: 'grouped', in: 'query', schema: { type: 'integer', enum: [1] }, description: 'Also return company_groups and normalized round_categories. Includes nested company_groups.rounds.roles.shortlists. Raw shortlists, original rounds and dates are preserved.' }], responses: response }, post: { operationId: 'createShortlistDraft', summary: 'Create a shortlist and its first draft', security: secured, requestBody: bodySchema(draft), responses: { ...response, '201': { description: 'Draft created; not public until published' } } } },
     '/shortlists/{id}': { parameters: [parameter], get: { operationId: 'readShortlist', summary: 'Read confirmed six-column rows and separate unresolved_candidates with possible master matches', responses: response }, delete: { operationId: 'deleteShortlist', summary: 'Owner only: hide a shortlist and retain its versions for recovery', security: ownerOnly, requestBody: deleteBody, responses: response } },
     '/shortlists/deleted': { get: { operationId: 'listDeletedShortlists', summary: 'Owner only: list deleted shortlists', security: ownerOnly, responses: response } },

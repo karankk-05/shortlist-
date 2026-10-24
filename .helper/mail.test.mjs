@@ -61,7 +61,7 @@ test('mailbox receipt dates preserve timezone offsets and never substitute proce
 });
 test('copied mail prompt includes detailed metadata, candidate evidence and duplicate rules', () => {
   const prompt = mailTaskPrompt('https://portal.example.invalid');
-  for (const rule of ['Position (the API field is role)', 'Test shortlist / online assessment / OA', 'Multiple positions/rounds', 'original message', 'DUPLICATE PREFLIGHT', 'EVIDENCE GATE', 'Date added', 'mail_lease_token', 'seven days after completed_at', 'source_deleted_at', 'unresolved_candidates', 'possible_rolls', 'one per unresolved source entry']) assert.ok(prompt.includes(rule), rule);
+  for (const rule of ['Position (the API field is role)', 'Test shortlist / online assessment / OA', 'Multiple positions/rounds', 'original message', 'DUPLICATE PREFLIGHT', 'EVIDENCE GATE', 'Date added', 'mail_lease_token', 'seven days after completed_at', 'source_deleted_at', 'unresolved_candidates', 'possible_rolls', 'one per unresolved source entry', 'job.owner_comment']) assert.ok(prompt.includes(rule), rule);
   assert.ok(prompt.length > 10000, 'The copied prompt must carry the workflow rather than just a link');
   assert.ok(prompt.includes('Do not drop an unmatched candidate silently.'), 'Include the base master matching policy, not only a reference to it');
   assert.equal(/(?:own_|upl_)[A-Za-z0-9_-]{40}/.test(prompt), false);

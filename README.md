@@ -87,6 +87,8 @@ Private API endpoints:
 | POST | `/api/v1/mail-jobs/{id}/review` or `/ignore` | Active lease; explanation required |
 | POST | `/api/v1/mail-jobs/{id}/retry` | Owner only |
 
+Owners can add an optional **Comment for agent** (up to 2,000 characters) beside **Requeue**, and edit it on a pending job using **Save comment** before the agent claims it. The private `owner_comment` is returned in queue and source responses, stays separate from collector/agent notes, and survives retries, rescans, completion and source cleanup. Comments never appear in public results. `POST /mail-jobs/{id}/retry` accepts `comment` and optional `expected_updated_at`; `PUT /mail-jobs/{id}/comment` requires both and only edits a pending, unchanged job. Uploader keys cannot write owner comments, and active claims cannot be edited.
+
 Processing limits and Cloudflare Free CPU/storage quotas still apply. The automated suite uses synthetic mail and an isolated local database; it cannot verify your password, IITK's authentication policy, or an external agent's scheduled-task capabilities.
 
 ## Hosting options

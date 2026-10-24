@@ -176,10 +176,23 @@ assert.equal((await call('mail-jobs?status=done', { key: true })).result.jobs[0]
 const duplicateClaim = (await call(`mail-jobs/${duplicateMail.id}/claim`, { method: 'POST', key: true, data: {} })).result;
 await call(`mail-jobs/${duplicateMail.id}/review`, { method: 'POST', key: true, data: { lease_token: duplicateClaim.lease_token, note: 'Event identity is ambiguous after inspecting this suspected duplicate.' } });
 await call(`mail-jobs/${duplicateMail.id}/retry`, { method: 'POST', key: true, data: {}, expected: 403 });
-await call(`mail-jobs/${duplicateMail.id}/retry`, { method: 'POST', owner: true, data: {} });
+const beforeRetry = (await call('mail-jobs/' + duplicateMail.id, { owner: true })).result.job;
+await call(`mail-jobs/${duplicateMail.id}/retry`, { method: 'POST', owner: true, data: { comment: 'x'.repeat(2001) }, expected: 400 });
+await call(`mail-jobs/${duplicateMail.id}/retry`, { method: 'POST', owner: true, data: { comment: 'Owner context', expected_updated_at: 'stale' }, expected: 409 });
+await call(`mail-jobs/${duplicateMail.id}/retry`, { method: 'POST', owner: true, data: { comment: 'Synthetic owner correction for the agent.', expected_updated_at: beforeRetry.updated_at } });
+const afterRetry = (await call('mail-jobs/' + duplicateMail.id, { key: true })).result.job;
+assert.equal(afterRetry.owner_comment, 'Synthetic owner correction for the agent.');
+assert.equal(afterRetry.note, beforeRetry.note, 'An owner comment must not replace the processing note');
+await call(`mail-jobs/${duplicateMail.id}/comment`, { method: 'PUT', key: true, data: { comment: 'Uploader cannot forge an owner comment', expected_updated_at: afterRetry.updated_at }, expected: 403 });
+await call(`mail-jobs/${duplicateMail.id}/comment`, { method: 'PUT', owner: true, evil: true, data: { comment: 'CSRF', expected_updated_at: afterRetry.updated_at }, expected: 403 });
+await call(`mail-jobs/${duplicateMail.id}/comment`, { method: 'PUT', owner: true, data: { comment: 'Stale', expected_updated_at: 'stale' }, expected: 409 });
+await call(`mail-jobs/${duplicateMail.id}/comment`, { method: 'PUT', owner: true, data: { comment: 'Updated synthetic owner context.', expected_updated_at: afterRetry.updated_at } });
+assert.equal((await call('mail-jobs?status=pending', { key: true })).result.jobs.find(job => job.id === duplicateMail.id).owner_comment, 'Updated synthetic owner context.');
 const reviewClaim = (await call(`mail-jobs/${duplicateMail.id}/claim`, { method: 'POST', key: true, data: {} })).result;
+await call(`mail-jobs/${duplicateMail.id}/comment`, { method: 'PUT', owner: true, data: { comment: 'Cannot change a claimed job', expected_updated_at: afterRetry.updated_at }, expected: 409 });
 await call(`mail-jobs/${duplicateMail.id}/review`, { method: 'POST', key: true, data: { lease_token: reviewClaim.lease_token, note: 'Ambiguous source; owner review needed.' } });
 assert.equal((await call('mail-jobs?status=needs_review', { owner: true })).result.jobs.length,1);
+assert.equal((await call('mail-jobs/' + duplicateMail.id, { key: true })).result.job.owner_comment, 'Updated synthetic owner context.', 'Agent decisions must preserve owner comments');
 const noMessageId = eml.replace('Message-ID: <mail-qa@example.invalid>\r\n','');
 const importedWithoutId = (await call('mail/import', { method: 'POST', owner: true, raw: noMessageId, expected: 201 })).result;
 const anotherWithoutId = (await call('mail/import', { method: 'POST', owner: true, raw: noMessageId.replace('Synthetic shortlist.','Another synthetic shortlist.'), expected: 201 })).result;
@@ -430,7 +443,7 @@ assert.equal((await call('mail-jobs/' + ambiguityMail.id, { key: true })).result
 
 await call('keys/' + key.id, { method: 'DELETE', owner: true });
 await call('master', { key: true, expected: 401 });
-console.log(JSON.stringify({ passed: true, http_checks: count, all_records_synthetic: true, checked: ['private master', 'anonymous write denial', 'uploader scopes', 'private source files', 'six columns', 'draft privacy', 'publication', 'CSV', 'version conflicts', 'restore', 'owner-only deletion', 'deleted export denial', 'stale deletion rejection', 'deleted shortlist recovery', 'private draft recovery', 'private mail ingestion', 'mail attachment storage', 'duplicate message detection', 'unapproved links', 'exclusive job claims', 'lease expiry and crash recovery', 'mail result publication', 'review and owner retry', 'seven-day completed-only retention', 'shared attachment protection', 'exact shortlist/master byte preservation', 'source deletion audit markers', 'retention idempotency', 'cron handler', 'server-owned company grouping', 'round alias categories', 'unchanged flat API and source event identities', 'grouped draft privacy', 'company-round-role nesting', 'published ambiguous identities and one-per-source counts', 'pinned alternative details', 'unblocked ambiguous mail completion', 'key revocation', 'CSRF'] }, null, 2));
+console.log(JSON.stringify({ passed: true, http_checks: count, all_records_synthetic: true, checked: ['private master', 'anonymous write denial', 'uploader scopes', 'private source files', 'six columns', 'draft privacy', 'publication', 'CSV', 'version conflicts', 'restore', 'owner-only deletion', 'deleted export denial', 'stale deletion rejection', 'deleted shortlist recovery', 'private draft recovery', 'private mail ingestion', 'mail attachment storage', 'duplicate message detection', 'unapproved links', 'exclusive job claims', 'lease expiry and crash recovery', 'mail result publication', 'review and owner retry', 'seven-day completed-only retention', 'shared attachment protection', 'exact shortlist/master byte preservation', 'source deletion audit markers', 'retention idempotency', 'cron handler', 'server-owned company grouping', 'round alias categories', 'unchanged flat API and source event identities', 'grouped draft privacy', 'company-round-role nesting', 'published ambiguous identities and one-per-source counts', 'pinned alternative details', 'unblocked ambiguous mail completion', 'owner-only retry comments and stale/claimed edit protection', 'key revocation', 'CSRF'] }, null, 2));
 
 } finally {
   server.kill('SIGTERM');

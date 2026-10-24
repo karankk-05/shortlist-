@@ -19,3 +19,5 @@
 @media(max-width:760px){.company-group-heading{padding:16px;gap:10px}.company-group-heading h2{font-size:13px}.company-group-count{font-size:10px}.company-group-table td{white-space:normal}.company-group-heading .company-logo{width:30px;height:30px;flex-shrink:0}.company-group-table{min-width:650px}}
 
 @media(max-width:760px){.group-toggle{padding:15px 12px;gap:8px}.company-label{font-size:13px}.round-group,.role-group{margin-left:12px}.identity-review{padding:18px}.identity-entry h3 .pill{display:inline-block;margin:7px 0 0}.group-label{white-space:normal}}
+
+.mail-requeue{width:220px;max-width:100%;margin-top:10px;display:grid;gap:7px;white-space:normal}.mail-requeue label{display:grid;gap:6px;color:var(--muted);font-size:10px}.mail-requeue textarea{width:100%;resize:vertical;border:1px solid var(--line);border-radius:5px;padding:8px;font-size:11px;line-height:1.5;min-height:52px;background:white;color:var(--ink)}.mail-requeue button{justify-self:start;font-size:11px}.owner-comment{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;line-height:1.7;color:#557047;margin:10px 0}
