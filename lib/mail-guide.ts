@@ -1,3 +1,5 @@
+import { agentGuide } from './agent-guide.ts';
+
 export function mailGuide(origin: string): string {
   return `# Shortlist Desk — mail processing workflow
 
@@ -46,5 +48,5 @@ All paths above are relative to ${origin}/api/v1 unless a full URL is shown. For
 
 /** A self-contained copyable prompt, with no account secrets or schedule creation side effects. */
 export function mailTaskPrompt(origin: string): string {
-  return `Use ${origin}/mail-agent as the canonical workflow. The detailed instructions are included below so this task remains understandable if the guide cannot be fetched. Use only the separate uploader key already supplied for this task; never request the IITK mailbox password or owner key.\n\n${mailGuide(origin)}\n\nExecute this workflow for the current run. Finish or safely checkpoint each claimed job. Return verified publication/reuse URLs, review items and failures; report when no actionable work remains. Do not create a recurring schedule unless the human separately asks you to schedule this task.`;
+  return `Use ${origin}/mail-agent as the canonical workflow. The detailed mail workflow and base matching/API instructions are included below so the task is self-contained. Use only the separate uploader key already supplied for this task; never request the IITK mailbox password or owner key.\n\n${mailGuide(origin)}\n\n# Base six-column matching and API reference\n\nFor mail jobs, complete the evidence and duplicate preflight above BEFORE the following master merge steps.\n\n${agentGuide(origin)}\n\nExecute the mail workflow for the current run. Finish or safely checkpoint each claimed job. Return verified publication/reuse URLs, review items and failures; report when no actionable work remains. Do not create a recurring schedule unless the human separately asks you to schedule this task.`;
 }
