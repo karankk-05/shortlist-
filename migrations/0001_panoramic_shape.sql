@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `shortlist_company_role_round_season` ON `shortlists` (lower("company"),lower("role"),lower("round"),lower("season"));
