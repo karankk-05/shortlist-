@@ -123,6 +123,12 @@ await call('mail/sync', { method: 'POST', key: true, data: {}, expected: 503 });
 const mailConfig = { enabled: true, folder: 'INBOX', lookback_days: 30, senders: [], link_domains: ['iitk.ac.in','docs.google.com'] };
 await call('mail/config', { method: 'PUT', key: true, data: mailConfig, expected: 403 });
 await call('mail/config', { method: 'PUT', owner: true, data: mailConfig });
+for (const phrase of ['short', 'shortly', 'myshortlist', 'shortlistify']) {
+  const unrelated = (await call('mail/import', { method: 'POST', owner: true, raw: `From: Academic <academic@example.invalid>\r\nSubject: Course announcement\r\n\r\nA ${phrase} course update. https://docs.google.com/course\r\n`, expected: 201 })).result;
+  assert.equal(unrelated.filtered, true);
+  assert.equal(unrelated.queued, undefined);
+}
+assert.equal((await call('mail-jobs?status=all', { owner: true })).result.jobs.length, 0, 'Filtered mail must not enter the queue');
 const eml = 'From: Placement <placement@example.invalid>\r\nSubject: Synthetic shortlist notice\r\nMessage-ID: <mail-qa@example.invalid>\r\nDate: Sat, 24 Oct 2026 10:00:00 +0530\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="qa"\r\n\r\n--qa\r\nContent-Type: text/plain\r\n\r\nSynthetic shortlist. https://docs.google.com/spreadsheets/d/synthetic https://iitk.ac.in.evil.example/sheet\r\n--qa\r\nContent-Type: text/csv\r\nContent-Disposition: attachment; filename="synthetic-mail.csv"\r\n\r\nname,roll\r\nSynthetic Test A,0230001\r\n--qa--\r\n';
 await call('mail/import', { method: 'POST', key: true, raw: eml, expected: 403 });
 const mail = (await call('mail/import', { method: 'POST', owner: true, raw: eml, expected: 201 })).result;
@@ -171,6 +177,16 @@ const importedWithoutId = (await call('mail/import', { method: 'POST', owner: tr
 const anotherWithoutId = (await call('mail/import', { method: 'POST', owner: true, raw: noMessageId.replace('Synthetic shortlist.','Another synthetic shortlist.'), expected: 201 })).result;
 assert.equal(importedWithoutId.queued,true); assert.equal(anotherWithoutId.queued,true);
 assert.notEqual(importedWithoutId.id,anotherWithoutId.id,'Distinct messages without Message-ID must not collapse into one import');
+for (const phrase of ['short list', 'short-listed']) {
+  const result = (await call('mail/import', { method: 'POST', owner: true, raw: `From: Placement <placement@example.invalid>\r\nSubject: Company ${phrase}\r\n\r\nCandidates are attached.\r\n`, expected: 201 })).result;
+  assert.equal(result.queued, true, phrase);
+  assert.equal(result.status, 'pending');
+}
+const encoded = Buffer.from('The short list is attached.').toString('base64');
+const decodedMatch = (await call('mail/import', { method: 'POST', owner: true, raw: `From: Placement <placement@example.invalid>\r\nSubject: Company update\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n${encoded}\r\n`, expected: 201 })).result;
+assert.equal(decodedMatch.queued, true, 'Check MIME-decoded body text');
+const hiddenMatch = (await call('mail/import', { method: 'POST', owner: true, raw: 'From: Academic <academic@example.invalid>\r\nSubject: Course update\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>Class begins shortly.</p><a href="https://docs.google.com/shortlist">Course portal</a><script>shortlist</script>\r\n', expected: 201 })).result;
+assert.equal(hiddenMatch.filtered, true, 'Raw HTML URLs and scripts alone must not qualify an email');
 await call('keys/' + key.id, { method: 'DELETE', owner: true });
 await call('master', { key: true, expected: 401 });
 console.log(JSON.stringify({ passed: true, http_checks: count, all_records_synthetic: true, checked: ['private master', 'anonymous write denial', 'uploader scopes', 'private source files', 'six columns', 'draft privacy', 'publication', 'CSV', 'version conflicts', 'restore', 'owner-only deletion', 'deleted export denial', 'stale deletion rejection', 'deleted shortlist recovery', 'private draft recovery', 'private mail ingestion', 'mail attachment storage', 'duplicate message detection', 'unapproved links', 'exclusive job claims', 'lease expiry and crash recovery', 'mail result publication', 'review and owner retry', 'key revocation', 'CSRF'] }, null, 2));

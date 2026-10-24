@@ -3,6 +3,11 @@ import { InputError } from './records.ts';
 
 export type MailConfig = { enabled: boolean; folder: string; lookback_days: number; senders: string[]; link_domains: string[] };
 export const DEFAULT_MAIL_CONFIG: MailConfig = { enabled: true, folder: 'INBOX', lookback_days: 30, senders: [], link_domains: ['iitk.ac.in', 'docs.google.com', 'drive.google.com', 'onedrive.live.com', '1drv.ms'] };
+/** Match complete shortlist words, including separated and inflected forms. */
+export function hasShortlistKeyword(subject: string, text: string) {
+  const keyword = /(?<![\p{L}\p{N}_])short[\s\p{Pd}]*list(?:s|ed|ing)?(?![\p{L}\p{N}_])/iu;
+  return keyword.test(subject.normalize('NFKC')) || keyword.test(text.normalize('NFKC'));
+}
 export function validateMailConfig(input: Record<string, unknown>): MailConfig {
   if (typeof input.enabled !== 'boolean' || typeof input.folder !== 'string' || !input.folder || input.folder.length > 200 || /[^\x20-\x7e]/.test(input.folder)) throw new InputError('Provide an enabled flag and an ASCII IMAP folder name.');
   const days = Number(input.lookback_days);

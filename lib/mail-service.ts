@@ -2,7 +2,7 @@ import { connect } from 'cloudflare:sockets';
 import { objectStore } from './object-store';
 import { InputError } from './records';
 import { ImapReader, IMAP_HOST, IMAP_PORT, MAX_MAIL_BYTES, MailError } from './imap';
-import { DEFAULT_MAIL_CONFIG, parseMail, type MailConfig } from './mail-content';
+import { DEFAULT_MAIL_CONFIG, hasShortlistKeyword, parseMail, type MailConfig } from './mail-content';
 
 export async function mailHash(value: string | Uint8Array) {
   const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
@@ -24,6 +24,9 @@ export async function saveMail(db: D1Database, raw: Uint8Array, context: { accou
   try { parsed = await parseMail(raw, context.config, context.oversized); }
   catch { parsed = { message_id: '', subject: `Unreadable matching email (UID ${context.uid})`, sender: '', received_at: null, text: 'The MIME message could not be parsed. Inspect the original mailbox before processing this item.', links: [], attachments: [], truncated: true }; }
   if (context.config.senders.length && !context.config.senders.includes(parsed.sender)) return { filtered: true };
+  // Do not trust raw MIME/server substring matches (URLs, encodings and longer words can match).
+  // An incomplete source cannot be safely excluded; keep those candidates for review.
+  if (!context.oversized && !parsed.truncated && !hasShortlistKeyword(parsed.subject, parsed.text)) return { filtered: true };
   const rawHash = await mailHash(raw);
   const messageKey = await mailHash(context.account + '\n' + (parsed.message_id || context.validity + ':' + context.uid) + '\n' + rawHash);
   if (await db.prepare('SELECT id FROM mail_jobs WHERE message_key = ?').bind(messageKey).first()) return { duplicate: true };

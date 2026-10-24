@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ImapReader, imapQuote } from '../lib/imap.ts';
-import { DEFAULT_MAIL_CONFIG, extractMailLinks, parseMail, validateMailConfig } from '../lib/mail-content.ts';
+import { DEFAULT_MAIL_CONFIG, extractMailLinks, hasShortlistKeyword, parseMail, validateMailConfig } from '../lib/mail-content.ts';
 
 const enc = new TextEncoder(), dec = new TextDecoder();
 function mockImap(rejectLogin = false) {
@@ -34,6 +34,11 @@ test('IMAP uses EXAMINE and BODY.PEEK, parses split literals, and handles an emp
   assert.ok((await reader.header(11)).size > 0);
   assert.equal(dec.decode(await reader.message(11)), message);
   await reader.close();
+  const search = commands.find(line => line.includes('UID SEARCH'));
+  assert.match(search, /\(OR SUBJECT "shortlist" BODY "shortlist"\)/);
+  assert.match(search, /\(OR SUBJECT "short list" BODY "short list"\)/);
+  assert.match(search, /\(OR SUBJECT "short-list" BODY "short-list"\)/);
+  assert.equal(/(?:SUBJECT|BODY) "short"/.test(search), false);
   assert.ok(commands.some(line => line.includes('BODY.PEEK[]')));
   assert.equal(commands.some(line => /\b(?:SELECT|STORE|APPEND|DELETE|MOVE|EXPUNGE)\b/.test(line)), false);
 });
@@ -52,6 +57,16 @@ test('MIME decodes base64 attachments, encoded subjects and HTML links without e
   assert.equal(dec.decode(result.attachments[0].bytes), csv);
   assert.equal(result.links[0].allowed,true); assert.match(result.links[0].url,/a=1&b=2/);
   assert.equal(result.text.includes('neverExecute'),false);
+});
+test('shortlist keywords accept spaced/hyphenated forms and reject generic short or embedded substrings', () => {
+  for (const phrase of ['shortlist', 'SHORTLISTED', 'shortlists', 'shortlisting', 'short list', 'short listed', 'short-listed', 'short-listing', 'short\nlist', 'short\u00a0list', 'short\u2011listed']) {
+    assert.equal(hasShortlistKeyword(`Company [${phrase}]`, ''), true, phrase);
+    assert.equal(hasShortlistKeyword('Interview update', `Please see the ${phrase} attached.`), true, phrase);
+  }
+  for (const text of ['We will meet shortly', 'A short seminar', 'Here is a list', 'shortlistify', 'myshortlist', 'shortlist_id', 'shortlisté', 'éshortlist', 'shortlisted123']) {
+    assert.equal(hasShortlistKeyword(text, text), false, text);
+  }
+  assert.equal(hasShortlistKeyword('A short', 'list of courses'), false, 'Do not join words across subject/body');
 });
 test('link allowlist rejects lookalike hosts, credential URLs and insecure protocols', () => {
   const links = extractMailLinks('https://spo.iitk.ac.in/sheet https://iitk.ac.in.evil.example/sheet http://iitk.ac.in/old https://user:secret@iitk.ac.in/file', '', ['iitk.ac.in']);

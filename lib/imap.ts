@@ -88,7 +88,10 @@ export class ImapReader {
     if (first > last) return [];
     if (![first, last].every(value => Number.isSafeInteger(value) && value > 0) || !Number.isFinite(since.getTime())) throw new MailError('invalid_uid_range');
     const date = `${since.getUTCDate()}-${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][since.getUTCMonth()]}-${since.getUTCFullYear()}`;
-    const { lines } = await this.command(`UID SEARCH UID ${first}:${last} SINCE ${date} OR SUBJECT "short" BODY "short"`);
+    // IMAP substring search supplies candidates; decoded whole-word checks happen before storage.
+    const phrases = ['shortlist', 'short list', 'short-list'].map(phrase => `(OR SUBJECT ${imapQuote(phrase)} BODY ${imapQuote(phrase)})`);
+    const keywords = phrases.reduceRight((rest, phrase) => rest ? `(OR ${phrase} ${rest})` : phrase, '');
+    const { lines } = await this.command(`UID SEARCH UID ${first}:${last} SINCE ${date} ${keywords}`);
     return [...new Set(lines.filter(line => line.startsWith('* SEARCH')).flatMap(line => line.slice(8).trim().split(/\s+/).filter(Boolean).map(Number)))].filter(uid => Number.isSafeInteger(uid) && uid >= first && uid <= last).sort((a, b) => a - b);
   }
   async header(uid: number) {

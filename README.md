@@ -18,7 +18,7 @@ Company shortlist views include search, programme, branch and batch filters, CPI
 
 Open **[Mail workflow](https://shortlist-desk.shortlists.workers.dev/mail)** to collect shortlist emails into a private processing queue. The owner and authorized uploader agents can read that queue. Email bodies, attachments, links and mailbox credentials are never public. The agent publishes only the prepared six-column company results.
 
-The collector connects to the single configured IITK account at `qasid.iitk.ac.in:993` over TLS, using IITK's [documented external IMAP settings](https://www.iitk.ac.in/nt/faq/outlook.htm). It uses `EXAMINE`, `UID SEARCH` and `BODY.PEEK`, without sending mail, changing read flags, moving or deleting messages. It searches subjects/bodies for `short`, covering `shortlist` and `shortlisted`. The agent determines actual shortlist relevance.
+The collector connects to the single configured IITK account at `qasid.iitk.ac.in:993` over TLS, using IITK's [documented external IMAP settings](https://www.iitk.ac.in/nt/faq/outlook.htm). It uses `EXAMINE`, `UID SEARCH` and `BODY.PEEK`, without sending mail, changing read flags, moving or deleting messages. It searches subjects/bodies for `shortlist`, `short list` and `short-list`, also covering `shortlisted` and `short-listing`. Before storing a complete email, a second check requires a complete shortlist word in its decoded subject or body; generic `short`/`shortly`, hidden HTML and longer embedded substrings do not qualify. Incomplete sources remain review items. The agent determines actual company-shortlist relevance.
 
 ### Connect your mailbox privately
 
