@@ -19,13 +19,15 @@ try {
   let ready = false;
   for (let attempt = 0; attempt < 150; attempt++) {
     if (server.exitCode !== null) throw new Error('Preview exited: ' + logs);
-    try { const response = await fetch(origin + '/api/v1/health'); if (response.ok) { ready = true; break; } } catch {}
+    try { const response = await fetch(origin + '/api/v1/health', { headers: { Connection: 'close' } }); if (response.ok) { ready = true; break; } } catch {}
     await new Promise(resolve => setTimeout(resolve, 200));
   }
   if (!ready) throw new Error('Preview failed to start: ' + logs);
 let ownerCookie = '', uploaderKey = '', count = 0;
 async function call(path, { method = 'GET', owner = false, key = false, data, expected = 200, cookie, evil = false, form, raw } = {}) {
-  const response = await fetch(origin + '/api/v1/' + path, { method, headers: { ...(owner ? { Cookie: ownerCookie } : cookie ? { Cookie: cookie } : {}), ...(key ? { Authorization: `Bearer ${uploaderKey}` } : {}), ...(raw ? { 'Content-Type': 'message/rfc822' } : data ? { 'Content-Type': 'application/json' } : {}), ...(method !== 'GET' ? { Origin: evil ? 'https://evil.example.invalid' : origin } : {}) }, body: raw || form || (data ? JSON.stringify(data) : undefined), redirect: 'manual' });
+  // Synchronous SQL fixture commands can outlast the local server's keep-alive timeout.
+  // Close test connections so Node 22 never reuses a stale socket after a fixture write.
+  const response = await fetch(origin + '/api/v1/' + path, { method, headers: { Connection: 'close', ...(owner ? { Cookie: ownerCookie } : cookie ? { Cookie: cookie } : {}), ...(key ? { Authorization: `Bearer ${uploaderKey}` } : {}), ...(raw ? { 'Content-Type': 'message/rfc822' } : data ? { 'Content-Type': 'application/json' } : {}), ...(method !== 'GET' ? { Origin: evil ? 'https://evil.example.invalid' : origin } : {}) }, body: raw || form || (data ? JSON.stringify(data) : undefined), redirect: 'manual' });
   const result = response.headers.get('Content-Type')?.includes('application/json') ? await response.json() : await response.text();
   assert.equal(response.status, expected, `${method} ${path}: ${typeof result === 'object' ? result.error : response.status}`); count++;
   return { result, response };
@@ -33,7 +35,7 @@ async function call(path, { method = 'GET', owner = false, key = false, data, ex
 const signin = await call('session', { method: 'POST', data: { key: ownerKey } });
 ownerCookie = signin.response.headers.getSetCookie().map(cookie => cookie.split(';')[0]).join('; ');
 assert.match(ownerCookie, /^shortlist_session=/);
-const spoofed = await fetch(origin + '/api/v1/me', { headers: { 'X-ChatGPT-User-Email': 'owner@example.invalid', 'X-ChatGPT-User-Id': 'owner', 'X-ChatGPT-User': '{"email":"owner@example.invalid"}' } });
+const spoofed = await fetch(origin + '/api/v1/me', { headers: { Connection: 'close', 'X-ChatGPT-User-Email': 'owner@example.invalid', 'X-ChatGPT-User-Id': 'owner', 'X-ChatGPT-User': '{"email":"owner@example.invalid"}' } });
 assert.equal((await spoofed.json()).role, 'public', 'Untrusted identity headers must never authorize the owner'); count++;
 await call('session', { method: 'POST', data: { key: 'own_' + 'a'.repeat(43) }, expected: 401 });
 assert.equal((await call('me', { owner: true })).result.role, 'admin');
@@ -57,7 +59,7 @@ assert.match((await call('uploads/' + upload.id, { key: true })).result, /Synthe
 const bigBytes = Uint8Array.from({ length: 2 * 1024 * 1024 + 37 }, (_, index) => index % 251);
 const bigForm = new FormData(); bigForm.set('file', new File([bigBytes], 'synthetic-binary.xlsx'));
 const large = (await call('uploads', { method: 'POST', key: true, form: bigForm, expected: 201 })).result;
-const largeResponse = await fetch(origin + '/api/v1/uploads/' + large.id, { headers: { Authorization: 'Bearer ' + uploaderKey } });
+const largeResponse = await fetch(origin + '/api/v1/uploads/' + large.id, { headers: { Connection: 'close', Authorization: 'Bearer ' + uploaderKey } });
 assert.equal(largeResponse.status, 200);
 assert.deepEqual(new Uint8Array(await largeResponse.arrayBuffer()), bigBytes); count++;
 const input = { company: 'Synthetic QA Studio ' + Date.now(), role: 'Test role', round: 'Interview', season: 'QA only', master_id: master.id, rows, source_upload_ids: [upload.id], processing_notes: 'Private synthetic reconciliation note.' };
@@ -226,7 +228,7 @@ const mediaSource = (await call('mail-jobs/' + mediaJob.id, { key: true })).resu
 assert.equal(mediaSource.attachments.length, 2); assert.equal(mediaSource.attachments[1].inline, true);
 await call('uploads/' + mediaSource.attachments[0].id, { expected: 401 });
 assert.match((await call('uploads/' + mediaSource.attachments[0].id, { key: true })).result, /Synthetic 230002/);
-const imageDownload = await fetch(origin + '/api/v1/uploads/' + mediaSource.attachments[1].id, { headers: { Authorization: 'Bearer ' + uploaderKey } });
+const imageDownload = await fetch(origin + '/api/v1/uploads/' + mediaSource.attachments[1].id, { headers: { Connection: 'close', Authorization: 'Bearer ' + uploaderKey } });
 assert.equal(imageDownload.status, 200); assert.deepEqual(new Uint8Array(await imageDownload.arrayBuffer()), new Uint8Array(Buffer.from('iVBORw0KGgo=', 'base64'))); count++;
 // Simulate a message collected before image/TXT support: a rescan upgrades that same job.
 const legacySource = JSON.stringify({ ...mediaSource, attachments: [] });
@@ -338,7 +340,7 @@ await call(`shortlists/${mailDraft.shortlist_id}/restore`, { method: 'POST', own
 await call(`shortlists/${mailDraft.shortlist_id}/restore`, { method: 'POST', owner: true, data: { version_id: mailDraft.version_id, expected_current_version_id: revision.version_id, acknowledge_warnings: true } });
 assert.deepEqual((await call('shortlists/' + mailDraft.shortlist_id)).result.rows, rows, 'Historical versions remain restorable after source expiry');
 const cron = new URL('/__scheduled', origin); cron.searchParams.set('cron', '0 * * * *');
-const cronRun = await fetch(cron);
+const cronRun = await fetch(cron, { headers: { Connection: 'close' } });
 assert.equal(cronRun.status, 200, 'Local Cloudflare scheduled handler must execute successfully'); count++;
 const finalRetentionState = (await call('mail/status', { owner: true })).result.retention.last_run;
 assert.equal(finalRetentionState.status, 'ok'); assert.equal(finalRetentionState.jobs_cleaned, 0);
