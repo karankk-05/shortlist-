@@ -135,7 +135,7 @@ const mail = (await call('mail/import', { method: 'POST', owner: true, raw: eml,
 assert.equal(mail.status, 'pending');
 assert.equal((await call('mail/import', { method: 'POST', owner: true, raw: eml, expected: 201 })).result.duplicate, true);
 const duplicateMail = (await call('mail/import', { method: 'POST', owner: true, raw: eml.replace('mail-qa@','mail-qa-second@'), expected: 201 })).result;
-assert.equal(duplicateMail.status, 'needs_review');
+assert.equal(duplicateMail.status, 'pending', 'A content duplicate must remain available for agent event verification');
 await call('mail-jobs/' + mail.id, { expected: 401 });
 const mailDetail = (await call('mail-jobs/' + mail.id, { key: true })).result;
 assert.match(mailDetail.source.text, /Synthetic shortlist/);
@@ -144,7 +144,7 @@ assert.equal(mailDetail.source.attachments.length, 1);
 assert.equal(JSON.stringify(mailDetail).includes('lease_hash'), false);
 await call('uploads/' + mailDetail.source.attachments[0].id, { expected: 401 });
 assert.match((await call('uploads/' + mailDetail.source.attachments[0].id, { key: true })).result, /Synthetic Test A/);
-assert.equal((await call('mail-jobs', { key: true })).result.jobs.length, 1);
+assert.equal((await call('mail-jobs', { key: true })).result.jobs.length, 2);
 const claim = (await call(`mail-jobs/${mail.id}/claim`, { method: 'POST', key: true, data: {} })).result;
 await call(`mail-jobs/${mail.id}/claim`, { method: 'POST', owner: true, data: {}, expected: 409 });
 await call(`mail-jobs/${mail.id}/complete`, { method: 'POST', key: true, data: { lease_token: 'wrong' }, expected: 409 });
@@ -167,6 +167,8 @@ await call(`mail-jobs/${mail.id}/complete`, { method: 'POST', key: true, data: {
 await call(`mail-jobs/${mail.id}/complete`, { method: 'POST', key: true, data: { lease_token: reclaimed.lease_token, note: 'Verified synthetic public result.' } });
 await call(`mail-jobs/${mail.id}/claim`, { method: 'POST', key: true, data: {}, expected: 409 });
 assert.equal((await call('mail-jobs?status=done', { key: true })).result.jobs[0].result_version_ids[0],mailDraft.version_id);
+const duplicateClaim = (await call(`mail-jobs/${duplicateMail.id}/claim`, { method: 'POST', key: true, data: {} })).result;
+await call(`mail-jobs/${duplicateMail.id}/review`, { method: 'POST', key: true, data: { lease_token: duplicateClaim.lease_token, note: 'Event identity is ambiguous after inspecting this suspected duplicate.' } });
 await call(`mail-jobs/${duplicateMail.id}/retry`, { method: 'POST', key: true, data: {}, expected: 403 });
 await call(`mail-jobs/${duplicateMail.id}/retry`, { method: 'POST', owner: true, data: {} });
 const reviewClaim = (await call(`mail-jobs/${duplicateMail.id}/claim`, { method: 'POST', key: true, data: {} })).result;

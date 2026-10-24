@@ -45,7 +45,7 @@ async function refreshMailFiles(db: D1Database, existing: ExistingMail, parsed: 
     const contentHash = await mailHash(JSON.stringify({ files: hashes.sort(), links: parsed.links.map(link => link.url).sort() }));
     const duplicate = await db.prepare('SELECT id FROM mail_jobs WHERE content_hash = ? AND id != ? ORDER BY created_at LIMIT 1').bind(contentHash, existing.id).first<{ id: string }>();
     const note = duplicate ? 'Matching source content was seen before. Check whether this is a repeated announcement or a separate shortlist.' : existing.note.startsWith('Matching source content was seen before.') || added.length && existing.note.startsWith('No supported attachment') ? '' : existing.note;
-    const status = duplicate ? 'needs_review' : existing.status === 'needs_review' ? 'pending' : existing.status;
+    const status = existing.status === 'needs_review' ? 'pending' : existing.status;
     await store.put(sourceKey, JSON.stringify({ text: parsed.text, links: parsed.links, attachments: files })); keys.push(sourceKey);
     const statements = [db.prepare("UPDATE mail_jobs SET object_key = ?, source_upload_ids = ?, content_hash = ?, duplicate_of = ?, status = ?, note = ?, updated_at = ? WHERE id = ? AND updated_at = ? AND status IN ('pending','needs_review') AND result_version_ids = '[]' AND NOT EXISTS (SELECT 1 FROM versions WHERE source_mail_job_id = ?)")
       .bind(sourceKey, JSON.stringify(files.map(file => file.id)), contentHash, duplicate?.id || null, status, note, new Date().toISOString(), existing.id, existing.updated_at, existing.id)];
@@ -83,7 +83,8 @@ export async function saveMail(db: D1Database, raw: Uint8Array, context: { accou
       files.push({ id: uploadId, filename: file.filename, size: file.bytes.length, content_type: file.content_type, inline: file.inline, content_id: file.content_id });
     }
     const note = context.oversized ? 'Email exceeds 10 MiB. Only headers were saved; review the original mailbox.' : parsed.truncated ? 'Source exceeds the text, link or attachment count limit. The saved source is incomplete; review the original mailbox.' : duplicate ? 'Matching source content was seen before. Check whether this is a repeated announcement or a separate shortlist.' : !comparable ? 'No supported attachment or HTTPS link was found. Inspect the email text for candidate records.' : '';
-    const status = context.oversized || parsed.truncated || duplicate ? 'needs_review' : 'pending';
+    // Shared files/links are only a duplicate hint; the agent verifies event identity itself.
+    const status = context.oversized || parsed.truncated ? 'needs_review' : 'pending';
     await store.put(key, JSON.stringify({ text: parsed.text, links: parsed.links, attachments: files })); keys.push(key);
     await db.batch([
       ...files.map((file, index) => db.prepare('INSERT INTO uploads (id, filename, object_key, size, content_type, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(file.id, file.filename, keys[index], file.size, file.content_type, time, 'mail-collector')),
