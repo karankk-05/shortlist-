@@ -4,8 +4,8 @@ import { agentGuide } from '../lib/agent-guide';
 export default {
   async fetch(request: Request, env: Cloudflare.Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === '/agent' || url.pathname === '/agent.txt') return new Response(agentGuide(url.origin), {
-      headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' },
+    if (url.pathname === '/agent') return new Response(agentGuide(url.origin), {
+      headers: { 'Content-Type': 'text/markdown; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' },
     });
     if (url.pathname.startsWith('/api/')) return handle(request);
     const response = await env.ASSETS.fetch(request);
