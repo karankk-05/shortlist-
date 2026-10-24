@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { ArrowRight, ChevronRight } from 'lucide-react';
 import type { CompanyGroup } from '@/lib/shortlist-groups';
+import Collapsible from './collapsible';
 
 type Listing = { id: string; company: string; role: string; round: string; season: string; added_at: string; row_count: number | null; unresolved_count?: number };
 const date = (value: string) => new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }).format(new Date(value));
@@ -13,7 +14,7 @@ function Fold({ label, children, filterKey, className, control }: { label: React
     <button type="button" className="group-toggle" aria-expanded={open} aria-controls={control} onClick={() => setOpen(value => !value)}>
       <ChevronRight className={'group-chevron' + (open ? ' expanded' : '')} size={16} />{label}
     </button>
-    {open && <div id={control} className="group-children">{children}</div>}
+    <Collapsible open={open} id={control}>{children}</Collapsible>
   </section>;
 }
 
@@ -32,7 +33,7 @@ export default function ShortlistLibrary({ groups, filterKey }: { groups: Compan
             {role.shortlists.map(list => <tr className="clickable" key={list.id} onClick={() => { location.href = '/?list=' + list.id; }}>
               <td><a className="shortlist-position" href={'/?list=' + list.id} aria-label={`${company.company}: ${role.role} — ${list.round}`}>{list.round}</a><div className="subtle">{list.season}</div></td>
               <td>{(list.row_count || 0) + (list.unresolved_count || 0)}{!!list.unresolved_count && <div className="review-count">{list.unresolved_count} ambiguous</div>}</td>
-              <td className="muted">{date(list.added_at)}</td><td><ArrowRight size={15} color="#7d906f" /></td>
+              <td className="muted">{date(list.added_at)}</td><td><ArrowRight size={15} color="var(--muted)" /></td>
             </tr>)}
           </tbody></table></div>
         </Fold>)}
