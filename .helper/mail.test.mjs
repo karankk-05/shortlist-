@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ImapReader, imapQuote } from '../lib/imap.ts';
+import { ImapReader, imapQuote, imapReceivedAt } from '../lib/imap.ts';
 import { DEFAULT_MAIL_CONFIG, extractMailLinks, hasShortlistKeyword, parseMail, validateMailConfig } from '../lib/mail-content.ts';
+import { mailTaskPrompt } from '../lib/mail-guide.ts';
 
 const enc = new TextEncoder(), dec = new TextDecoder();
 function mockImap(rejectLogin = false) {
@@ -17,7 +18,7 @@ function mockImap(rejectLogin = false) {
       if (input.startsWith('LOGIN')) emit(`${tag} ${rejectLogin ? 'NO secret echoed by server' : 'OK authenticated'}\r\n`);
       else if (input.startsWith('EXAMINE')) emit(`* OK [UIDVALIDITY 99] valid\r\n* OK [UIDNEXT 16] next\r\n${tag} OK [READ-ONLY] examined\r\n`);
       else if (input.startsWith('UID SEARCH')) emit(`* SEARCH 11 13 15\r\n${tag} OK searched\r\n`);
-      else if (input.includes('HEADER.FIELDS')) emit(`* 1 FETCH (UID 11 RFC822.SIZE ${enc.encode(message).length} BODY[HEADER.FIELDS (MESSAGE-ID SUBJECT FROM DATE)] {${enc.encode(header).length}}\r\n${header})\r\n${tag} OK fetched\r\n`);
+      else if (input.includes('HEADER.FIELDS')) emit(`* 1 FETCH (UID 11 RFC822.SIZE ${enc.encode(message).length} INTERNALDATE "24-Oct-2026 10:00:00 +0530" BODY[HEADER.FIELDS (MESSAGE-ID SUBJECT FROM DATE)] {${enc.encode(header).length}}\r\n${header})\r\n${tag} OK fetched\r\n`);
       else if (input.startsWith('UID FETCH')) emit(`* 1 FETCH (UID 11 BODY[] {${enc.encode(message).length}}\r\n${message})\r\n${tag} OK fetched\r\n`);
       else if (input === 'LOGOUT') emit(`* BYE logout\r\n${tag} OK logout\r\n`);
       else throw Error('Unexpected test command');
@@ -31,7 +32,8 @@ test('IMAP uses EXAMINE and BODY.PEEK, parses split literals, and handles an emp
   assert.deepEqual(await reader.examine('INBOX'), { validity: '99', lastUid: 15 });
   assert.deepEqual(await reader.search(11, 15, new Date('2026-10-01')), [11,13,15]);
   const before = commands.length; assert.deepEqual(await reader.search(16, 15, new Date()), []); assert.equal(commands.length, before);
-  assert.ok((await reader.header(11)).size > 0);
+  const header = await reader.header(11); assert.ok(header.size > 0);
+  assert.equal(header.receivedAt, '2026-10-24T04:30:00.000Z');
   assert.equal(dec.decode(await reader.message(11)), message);
   await reader.close();
   const search = commands.find(line => line.includes('UID SEARCH'));
@@ -39,8 +41,20 @@ test('IMAP uses EXAMINE and BODY.PEEK, parses split literals, and handles an emp
   assert.match(search, /\(OR SUBJECT "short list" BODY "short list"\)/);
   assert.match(search, /\(OR SUBJECT "short-list" BODY "short-list"\)/);
   assert.equal(/(?:SUBJECT|BODY) "short"/.test(search), false);
+  assert.ok(commands.some(line => line.includes('RFC822.SIZE INTERNALDATE BODY.PEEK')));
   assert.ok(commands.some(line => line.includes('BODY.PEEK[]')));
   assert.equal(commands.some(line => /\b(?:SELECT|STORE|APPEND|DELETE|MOVE|EXPUNGE)\b/.test(line)), false);
+});
+test('mailbox receipt dates preserve timezone offsets and never substitute processing time', () => {
+  assert.equal(imapReceivedAt(['* 1 FETCH (INTERNALDATE " 7-Oct-2026 23:00:00 -0400")']), '2026-10-08T03:00:00.000Z');
+  assert.throws(() => imapReceivedAt(['* 1 FETCH (UID 11)']), /received_date_missing/);
+  assert.throws(() => imapReceivedAt(['* 1 FETCH (INTERNALDATE "07-Wat-2026 23:00:00 +0000")']), /received_date_missing/);
+});
+test('copied mail prompt includes detailed metadata, candidate evidence and duplicate rules', () => {
+  const prompt = mailTaskPrompt('https://portal.example.invalid');
+  for (const rule of ['Position (the API field is role)', 'Test shortlist / online assessment / OA', 'Multiple positions/rounds', 'original message', 'DUPLICATE PREFLIGHT', 'EVIDENCE GATE', 'Date added', 'mail_lease_token']) assert.ok(prompt.includes(rule), rule);
+  assert.ok(prompt.length > 10000, 'The copied prompt must carry the workflow rather than just a link');
+  assert.equal(/(?:own_|upl_)[A-Za-z0-9_-]{40}/.test(prompt), false);
 });
 test('IMAP escapes quotes and rejects command injection; login errors do not expose server text', async () => {
   assert.equal(imapQuote('a"b\\c'), '"a\\"b\\\\c"');

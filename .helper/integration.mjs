@@ -139,6 +139,7 @@ assert.equal(duplicateMail.status, 'pending', 'A content duplicate must remain a
 await call('mail-jobs/' + mail.id, { expected: 401 });
 const mailDetail = (await call('mail-jobs/' + mail.id, { key: true })).result;
 assert.match(mailDetail.source.text, /Synthetic shortlist/);
+assert.equal(mailDetail.source.sent_at, '2026-10-24T04:30:00.000Z', 'Preserve the original Date header privately for event interpretation');
 assert.equal(mailDetail.source.links[0].allowed, true); assert.equal(mailDetail.source.links[1].allowed, false);
 assert.equal(mailDetail.source.attachments.length, 1);
 assert.equal(JSON.stringify(mailDetail).includes('lease_hash'), false);
@@ -156,6 +157,9 @@ const mailDraft = (await call('shortlists', { method: 'POST', key: true, data: m
 await call(`shortlists/${mailDraft.shortlist_id}/versions`, { method: 'POST', key: true, data: { ...mailInput, expected_latest_version_id: mailDraft.version_id }, expected: 409 });
 await call(`shortlists/${mailDraft.shortlist_id}/publish`, { method: 'POST', key: true, data: { version_id: mailDraft.version_id, expected_current_version_id: null }, expected: 409 });
 await call(`shortlists/${mailDraft.shortlist_id}/publish`, { method: 'POST', key: true, data: { version_id: mailDraft.version_id, expected_current_version_id: null, mail_lease_token: claim.lease_token } });
+const publishedMail = (await call('shortlists/' + mailDraft.shortlist_id)).result;
+assert.equal(publishedMail.shortlist.added_at, mailDetail.job.received_at, 'Date added must use the source date rather than publication time');
+assert.notEqual(publishedMail.shortlist.added_at, publishedMail.shortlist.updated_at, 'Audit time must remain separate from the displayed source date');
 // Simulate an interrupted agent after publication. A later run resumes the same result.
 const expired = spawnSync(process.execPath, [cli, 'd1','execute','DB','--local','--persist-to',state,'--command',`UPDATE mail_jobs SET lease_until = '2000-01-01T00:00:00.000Z' WHERE id = '${mail.id}'`], { encoding: 'utf8' });
 assert.equal(expired.status, 0, 'Synthetic lease expiry failed');
@@ -206,6 +210,7 @@ await call(`mail-jobs/${resend.id}/complete`, { method: 'POST', key: true, data:
 const reusedJob = (await call(`mail-jobs/${resend.id}`, { key: true })).result;
 assert.equal(reusedJob.job.status, 'done'); assert.deepEqual(reusedJob.job.result_version_ids, [mailDraft.version_id]);
 assert.equal((await call(`shortlists/${mailDraft.shortlist_id}/versions`, { key: true })).result.versions.length, 1, 'Duplicate mail must not add a version');
+assert.equal((await call('shortlists/' + mailDraft.shortlist_id)).result.shortlist.added_at, publishedMail.shortlist.added_at, 'A resend must not bump Date added');
 // Only a current publication can be reused; a new event/time gets its own identity.
 const newerMail = (await call('mail/import', { method: 'POST', owner: true, raw: 'From: SPO <spo@example.invalid>\r\nSubject: New event short lists\r\nDate: Sat, 24 Oct 2026 12:00:00 +0530\r\n\r\nShort listed students: 0230001, 230002.\r\n', expected: 201 })).result;
 const newerClaim = (await call(`mail-jobs/${newerMail.id}/claim`, { method: 'POST', key: true, data: {} })).result;
@@ -234,6 +239,26 @@ assert.equal(upgraded.updated, true); assert.equal(upgraded.added_attachments, 2
 const upgradedDetail = (await call('mail-jobs/' + mediaJob.id, { key: true })).result;
 assert.equal(upgradedDetail.source.attachments.length, 2); assert.equal(upgradedDetail.job.source_upload_ids.length, 2);
 assert.equal((await call('mail/import', { method: 'POST', owner: true, raw: mediaEml, expected: 201 })).result.updated, undefined, 'A second rescan must not upload those files again');
+// Publishing an old email after a newer one must not move it ahead in the dashboard.
+await call(`shortlists/${newEvent.shortlist_id}/publish`, { method: 'POST', key: true, data: { version_id: newEvent.version_id, expected_current_version_id: null, mail_lease_token: newerClaim.lease_token } });
+const historicalMail = (await call('mail/import', { method: 'POST', owner: true, raw: 'From: SPO <spo@example.invalid>\r\nSubject: Historical test shortlist\r\nDate: Thu, 1 Oct 2026 12:00:00 +0530\r\n\r\nBusiness Analyst shortlisted for an online assessment: 0230001, 230002.\r\n', expected: 201 })).result;
+const historicalDetail = (await call('mail-jobs/' + historicalMail.id, { key: true })).result;
+const historicalClaim = (await call(`mail-jobs/${historicalMail.id}/claim`, { method: 'POST', key: true, data: {} })).result;
+const historicalDraft = (await call('shortlists', { method: 'POST', key: true, data: { ...input, company: input.company + ' historical', role: 'Business Analyst', round: 'Online assessment', mail_job_id: historicalMail.id, mail_lease_token: historicalClaim.lease_token, source_upload_ids: [] }, expected: 201 })).result;
+await call(`shortlists/${historicalDraft.shortlist_id}/publish`, { method: 'POST', key: true, data: { version_id: historicalDraft.version_id, expected_current_version_id: null, mail_lease_token: historicalClaim.lease_token } });
+const datedIndex = (await call('shortlists')).result.shortlists;
+for(let index = 1; index < datedIndex.length; index++) assert.ok(datedIndex[index - 1].added_at >= datedIndex[index].added_at, 'Dashboard sorts by Date added');
+assert.ok(datedIndex.findIndex(list => list.id === newEvent.shortlist_id) < datedIndex.findIndex(list => list.id === historicalDraft.shortlist_id));
+assert.equal(datedIndex.find(list => list.id === historicalDraft.shortlist_id).added_at, historicalDetail.job.received_at);
+// A real revision adopts its own source date; restoring the original restores its date too.
+const revisionMail = (await call('mail/import', { method: 'POST', owner: true, raw: 'From: SPO <spo@example.invalid>\r\nSubject: Revised interview shortlist\r\nDate: Sun, 25 Oct 2026 12:00:00 +0530\r\n\r\nRevised shortlisted candidates: 0230001. This replaces the earlier list for the same interview.\r\n', expected: 201 })).result;
+const revisionDetail = (await call('mail-jobs/' + revisionMail.id, { key: true })).result;
+const revisionClaim = (await call(`mail-jobs/${revisionMail.id}/claim`, { method: 'POST', key: true, data: {} })).result;
+const revision = (await call(`shortlists/${mailDraft.shortlist_id}/versions`, { method: 'POST', key: true, data: { ...input, rows: rows.slice(0,1), mail_job_id: revisionMail.id, mail_lease_token: revisionClaim.lease_token, source_upload_ids: [], expected_latest_version_id: mailDraft.version_id }, expected: 201 })).result;
+await call(`shortlists/${mailDraft.shortlist_id}/publish`, { method: 'POST', key: true, data: { version_id: revision.version_id, expected_current_version_id: mailDraft.version_id, mail_lease_token: revisionClaim.lease_token } });
+assert.equal((await call('shortlists/' + mailDraft.shortlist_id)).result.shortlist.added_at, revisionDetail.job.received_at);
+await call(`shortlists/${mailDraft.shortlist_id}/restore`, { method: 'POST', owner: true, data: { version_id: mailDraft.version_id, expected_current_version_id: revision.version_id, acknowledge_warnings: true } });
+assert.equal((await call('shortlists/' + mailDraft.shortlist_id)).result.shortlist.added_at, publishedMail.shortlist.added_at);
 await call('keys/' + key.id, { method: 'DELETE', owner: true });
 await call('master', { key: true, expected: 401 });
 console.log(JSON.stringify({ passed: true, http_checks: count, all_records_synthetic: true, checked: ['private master', 'anonymous write denial', 'uploader scopes', 'private source files', 'six columns', 'draft privacy', 'publication', 'CSV', 'version conflicts', 'restore', 'owner-only deletion', 'deleted export denial', 'stale deletion rejection', 'deleted shortlist recovery', 'private draft recovery', 'private mail ingestion', 'mail attachment storage', 'duplicate message detection', 'unapproved links', 'exclusive job claims', 'lease expiry and crash recovery', 'mail result publication', 'review and owner retry', 'key revocation', 'CSRF'] }, null, 2));

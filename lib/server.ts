@@ -16,6 +16,9 @@ const bucket = () => objectStore(db());
 const now = () => new Date().toISOString();
 const id = () => crypto.randomUUID();
 const responseHeaders = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin' };
+const listVersionJoins = 'LEFT JOIN versions v ON v.id = coalesce(s.published_version_id, (SELECT id FROM versions WHERE shortlist_id = s.id ORDER BY number DESC LIMIT 1)) LEFT JOIN mail_jobs m ON m.id = v.source_mail_job_id';
+// Resends never bump an existing result. A verified mail reference can date a manual result.
+const listAddedAt = "coalesce(m.received_at, (SELECT min(j.received_at) FROM mail_jobs j WHERE j.status = 'done' AND EXISTS (SELECT 1 FROM json_each(j.result_version_ids) WHERE value = v.id)), v.created_at, s.created_at)";
 const json = (data: unknown, status = 200, headers: Record<string, string> = {}) => Response.json(data, { status, headers: { ...responseHeaders, ...headers } });
 const plain = (data: string, type = 'text/plain; charset=utf-8', headers: Record<string, string> = {}) => new Response(data, { headers: { ...responseHeaders, 'Content-Type': type, ...headers } });
 
@@ -75,7 +78,7 @@ async function masterRows(master: Master) {
   return object.json<StudentRow[]>();
 }
 async function findList(listId: string) {
-  const list = await db().prepare('SELECT * FROM shortlists WHERE id = ? AND deleted_at IS NULL').bind(listId).first<List>();
+  const list = await db().prepare(`SELECT s.*, ${listAddedAt} AS added_at FROM shortlists s ${listVersionJoins} WHERE s.id = ? AND s.deleted_at IS NULL`).bind(listId).first<List>();
   if (!list) throw new InputError('Shortlist not found.', 404); return list;
 }
 async function findVersion(versionId: string, listId: string) {
@@ -344,12 +347,12 @@ export async function handle(request: Request): Promise<Response> {
     if (resource === 'shortlists') {
       if (method === 'GET' && item === 'deleted' && !action) {
         await access(request, true);
-        const result = await db().prepare('SELECT s.*, v.row_count, v.number AS version_number, (SELECT count(*) FROM versions WHERE shortlist_id = s.id) AS version_count FROM shortlists s LEFT JOIN versions v ON v.id = s.published_version_id WHERE s.deleted_at IS NOT NULL ORDER BY s.deleted_at DESC').all();
+        const result = await db().prepare(`SELECT s.*, ${listAddedAt} AS added_at, v.row_count, v.number AS version_number, (SELECT count(*) FROM versions WHERE shortlist_id = s.id) AS version_count FROM shortlists s ${listVersionJoins} WHERE s.deleted_at IS NOT NULL ORDER BY s.deleted_at DESC`).all();
         return json({ shortlists: result.results });
       }
       if (method === 'GET' && !item) {
         const drafts = url.searchParams.get('include_drafts') === '1'; if (drafts) await access(request);
-        const result = await db().prepare(`SELECT s.*, v.row_count, v.number AS version_number, v.published_at, (SELECT count(*) FROM versions WHERE shortlist_id = s.id) AS version_count FROM shortlists s LEFT JOIN versions v ON v.id = s.published_version_id WHERE s.deleted_at IS NULL ${drafts ? '' : 'AND s.published_version_id IS NOT NULL'} ORDER BY s.updated_at DESC`).all();
+        const result = await db().prepare(`SELECT s.*, ${listAddedAt} AS added_at, v.row_count, v.number AS version_number, v.published_at, (SELECT count(*) FROM versions WHERE shortlist_id = s.id) AS version_count FROM shortlists s ${listVersionJoins} WHERE s.deleted_at IS NULL ${drafts ? '' : 'AND s.published_version_id IS NOT NULL'} ORDER BY added_at DESC, s.created_at DESC, s.id DESC`).all();
         return json({ shortlists: result.results });
       }
       if (method === 'DELETE' && item && !action) return await deleteShortlist(request, item);
@@ -406,7 +409,7 @@ function openapi(origin: string) {
     '/mail-jobs/{id}/review': { parameters: [parameter], post: { operationId: 'reviewMailJob', summary: 'Leave an unresolved job for owner review; note is required', security: secured, requestBody: mailAction, responses: response } },
     '/mail-jobs/{id}/ignore': { parameters: [parameter], post: { operationId: 'ignoreMailJob', summary: 'Ignore an irrelevant claimed email with an explanation', security: secured, requestBody: mailAction, responses: response } },
     '/mail-jobs/{id}/retry': { parameters: [parameter], post: { operationId: 'retryMailJob', summary: 'Owner only: requeue a reviewed/ignored source', security: ownerOnly, responses: response } },
-    '/shortlists': { get: { operationId: 'listShortlists', summary: 'List published shortlists', parameters: [{ name: 'include_drafts', in: 'query', schema: { type: 'integer', enum: [1] }, description: 'Requires authentication when set.' }], responses: response }, post: { operationId: 'createShortlistDraft', summary: 'Create a shortlist and its first draft', security: secured, requestBody: bodySchema(draft), responses: { ...response, '201': { description: 'Draft created; not public until published' } } } },
+    '/shortlists': { get: { operationId: 'listShortlists', summary: 'List published shortlists by added_at, newest first; mail results use the source mailbox receipt date', parameters: [{ name: 'include_drafts', in: 'query', schema: { type: 'integer', enum: [1] }, description: 'Requires authentication when set.' }], responses: response }, post: { operationId: 'createShortlistDraft', summary: 'Create a shortlist and its first draft', security: secured, requestBody: bodySchema(draft), responses: { ...response, '201': { description: 'Draft created; not public until published' } } } },
     '/shortlists/{id}': { parameters: [parameter], get: { operationId: 'readShortlist', summary: 'Read current published six-column rows', responses: response }, delete: { operationId: 'deleteShortlist', summary: 'Owner only: hide a shortlist and retain its versions for recovery', security: ownerOnly, requestBody: deleteBody, responses: response } },
     '/shortlists/deleted': { get: { operationId: 'listDeletedShortlists', summary: 'Owner only: list deleted shortlists', security: ownerOnly, responses: response } },
     '/shortlists/{id}/undelete': { parameters: [parameter], post: { operationId: 'undeleteShortlist', summary: 'Owner only: restore a deleted shortlist and its previous publication', security: ownerOnly, requestBody: deleteBody, responses: response } },

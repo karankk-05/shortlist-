@@ -7,6 +7,13 @@ export class MailError extends Error {
 export const IMAP_HOST = 'qasid.iitk.ac.in';
 export const IMAP_PORT = 993;
 export const MAX_MAIL_BYTES = 10 * 1024 * 1024;
+export function imapReceivedAt(lines: string[]) {
+  const value = lines.join(' ').match(/\bINTERNALDATE "\s*(\d{1,2})-([A-Za-z]{3})-(\d{4}) (\d{2}:\d{2}:\d{2}) ([+-]\d{2})(\d{2})"/i);
+  const month = value ? ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'].indexOf(value[2].toLowerCase()) + 1 : 0;
+  const time = value && month ? Date.parse(`${value[3]}-${String(month).padStart(2, '0')}-${value[1].padStart(2, '0')}T${value[4]}${value[5]}:${value[6]}`) : NaN;
+  if (!Number.isFinite(time)) throw new MailError('imap_received_date_missing');
+  return new Date(time).toISOString();
+}
 const encoder = new TextEncoder(), decoder = new TextDecoder();
 export function imapQuote(value: string) {
   if (!value || value.length > 512 || /[^\x20-\x7e]/.test(value)) throw new MailError('invalid_login_or_folder');
@@ -95,11 +102,11 @@ export class ImapReader {
     return [...new Set(lines.filter(line => line.startsWith('* SEARCH')).flatMap(line => line.slice(8).trim().split(/\s+/).filter(Boolean).map(Number)))].filter(uid => Number.isSafeInteger(uid) && uid >= first && uid <= last).sort((a, b) => a - b);
   }
   async header(uid: number) {
-    const response = await this.command(`UID FETCH ${uid} (UID RFC822.SIZE BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT FROM DATE)])`);
+    const response = await this.command(`UID FETCH ${uid} (UID RFC822.SIZE INTERNALDATE BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT FROM DATE)])`);
     if (!response.lines.some(line => new RegExp(`\\bUID ${uid}\\b`).test(line))) return null;
     const size = Number(response.lines.join(' ').match(/RFC822\.SIZE (\d+)/i)?.[1]);
     if (!Number.isSafeInteger(size)) throw new MailError('imap_size_missing');
-    return { size, bytes: response.literals[0] || new Uint8Array() };
+    return { size, bytes: response.literals[0] || new Uint8Array(), receivedAt: imapReceivedAt(response.lines) };
   }
   async message(uid: number) {
     const response = await this.command(`UID FETCH ${uid} (UID BODY.PEEK[])`);
