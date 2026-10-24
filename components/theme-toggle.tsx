@@ -22,7 +22,10 @@ export default function ThemeToggle() {
     setTheme(next);
     try { localStorage.setItem('shortlist-theme', next); } catch { /* The toggle still works when storage is unavailable. */ }
   }
-  return <button className="secondary theme-toggle" type="button" aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} onClick={toggle}>
-    {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}<span>{theme === 'dark' ? 'Light mode' : 'Dark mode'}</span>
+  return <button className="theme-toggle" type="button" role="switch" aria-label="Dark mode" aria-checked={theme === 'dark'} title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} onClick={toggle}>
+    <span className="theme-track" aria-hidden="true">
+      <Sun className="theme-sun" size={13} /><Moon className="theme-moon" size={13} />
+      <span className="theme-thumb">{theme === 'dark' ? <Moon size={14} /> : <Sun size={14} />}</span>
+    </span>
   </button>;
 }
