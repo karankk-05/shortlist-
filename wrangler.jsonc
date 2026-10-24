@@ -8,12 +8,17 @@
     "directory": "./dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/agent"]
+    "run_worker_first": [
+      "/api/*",
+      "/agent"
+    ]
   },
-  "d1_databases": [{
-    "binding": "DB",
-    "database_name": "shortlist-db",
-    "database_id": "00000000-0000-0000-0000-000000000000",
-    "migrations_dir": "migrations"
-  }]
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "shortlist-db",
+      "database_id": "f88bea3d-cb25-4d88-ac1a-ccaf64f19010",
+      "migrations_dir": "migrations"
+    }
+  ]
 }

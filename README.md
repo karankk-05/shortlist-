@@ -1,5 +1,7 @@
 # Shortlist Desk
 
+Deployment address: **https://shortlist-desk.shortlists.workers.dev** · [Agent instructions](https://shortlist-desk.shortlists.workers.dev/agent) · [Upload workspace](https://shortlist-desk.shortlists.workers.dev/upload)
+
 A website and HTTP API for company interview shortlists. Gemini (or another capable external agent) interprets company spreadsheets and joins them with a private student master. **The site validates and stores the result; it does not match students or call an AI API.**
 
 Each result has exactly these columns, in this order, on one worksheet:
@@ -48,6 +50,8 @@ npm run setup:owner
 4. `setup:owner` generates a random 256-bit owner key and sends **only its SHA-256 hash** to Cloudflare's secret store. It prints the private key once in your terminal. Save it in a password manager. Do not share this owner key with AI agents or GitHub. Rerunning rotates owner access and invalidates prior owner sessions.
 
 Open `/admin` on the new site and sign in with that key. Import your reviewed single-sheet student master. The importer stores only the six supported columns, even if the master has extra review columns. Import it through the private website; never put student data in this public repository.
+
+This repository is configured for the owner's existing Cloudflare database. When deploying a fork to another account, reset `database_id` in `wrangler.jsonc` to `00000000-0000-0000-0000-000000000000` before running setup, so it creates a database in that account.
 
 Create a separate, expiring uploader key in Owner settings for Gemini. Uploader keys can read the private master, store originals, create drafts and publish. They cannot replace the master, manage access or restore versions. Revocation applies on subsequent requests, including existing browser sessions.
 
