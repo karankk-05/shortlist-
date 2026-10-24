@@ -25,7 +25,7 @@ export async function saveMail(db: D1Database, raw: Uint8Array, context: { accou
   catch { parsed = { message_id: '', subject: `Unreadable matching email (UID ${context.uid})`, sender: '', received_at: null, text: 'The MIME message could not be parsed. Inspect the original mailbox before processing this item.', links: [], attachments: [], truncated: true }; }
   if (context.config.senders.length && !context.config.senders.includes(parsed.sender)) return { filtered: true };
   const rawHash = await mailHash(raw);
-  const messageKey = await mailHash(context.account + '\n' + (parsed.message_id ? parsed.message_id + '\n' + rawHash : context.validity + ':' + context.uid));
+  const messageKey = await mailHash(context.account + '\n' + (parsed.message_id || context.validity + ':' + context.uid) + '\n' + rawHash);
   if (await db.prepare('SELECT id FROM mail_jobs WHERE message_key = ?').bind(messageKey).first()) return { duplicate: true };
   const attachmentHashes = await Promise.all(parsed.attachments.map(file => mailHash(file.bytes)));
   const contentHash = await mailHash(JSON.stringify({ files: attachmentHashes.slice().sort(), links: parsed.links.map(link => link.url).sort() }));

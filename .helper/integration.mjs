@@ -166,6 +166,11 @@ await call(`mail-jobs/${duplicateMail.id}/retry`, { method: 'POST', owner: true,
 const reviewClaim = (await call(`mail-jobs/${duplicateMail.id}/claim`, { method: 'POST', key: true, data: {} })).result;
 await call(`mail-jobs/${duplicateMail.id}/review`, { method: 'POST', key: true, data: { lease_token: reviewClaim.lease_token, note: 'Ambiguous source; owner review needed.' } });
 assert.equal((await call('mail-jobs?status=needs_review', { owner: true })).result.jobs.length,1);
+const noMessageId = eml.replace('Message-ID: <mail-qa@example.invalid>\r\n','');
+const importedWithoutId = (await call('mail/import', { method: 'POST', owner: true, raw: noMessageId, expected: 201 })).result;
+const anotherWithoutId = (await call('mail/import', { method: 'POST', owner: true, raw: noMessageId.replace('Synthetic shortlist.','Another synthetic shortlist.'), expected: 201 })).result;
+assert.equal(importedWithoutId.queued,true); assert.equal(anotherWithoutId.queued,true);
+assert.notEqual(importedWithoutId.id,anotherWithoutId.id,'Distinct messages without Message-ID must not collapse into one import');
 await call('keys/' + key.id, { method: 'DELETE', owner: true });
 await call('master', { key: true, expected: 401 });
 console.log(JSON.stringify({ passed: true, http_checks: count, all_records_synthetic: true, checked: ['private master', 'anonymous write denial', 'uploader scopes', 'private source files', 'six columns', 'draft privacy', 'publication', 'CSV', 'version conflicts', 'restore', 'owner-only deletion', 'deleted export denial', 'stale deletion rejection', 'deleted shortlist recovery', 'private draft recovery', 'private mail ingestion', 'mail attachment storage', 'duplicate message detection', 'unapproved links', 'exclusive job claims', 'lease expiry and crash recovery', 'mail result publication', 'review and owner retry', 'key revocation', 'CSRF'] }, null, 2));
