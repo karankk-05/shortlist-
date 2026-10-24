@@ -12,7 +12,7 @@ import ThemeToggle from './theme-toggle';
 import Collapsible from './collapsible';
 
 type View = 'library' | 'upload' | 'guide' | 'admin' | 'mail';
-type Session = { role: 'public' | 'uploader' | 'admin'; label: string | null; owner_configured: boolean };
+type Session = { role: 'public' | 'uploader' | 'admin'; label: string | null; owner_configured: boolean; owner_entry_path?: string | null };
 type Listing = { id: string; company: string; role: string; round: string; season: string; notes: string; published_version_id: string | null; row_count: number | null; unresolved_count?: number; added_at: string; updated_at: string; version_number: number | null; version_count: number; deleted_at?: string | null };
 type Master = { id: string; name: string; row_count: number; cpi_count: number; created_at: string };
 type Version = { id: string; number: number; row_count: number; unresolved_count: number; published_at: string | null; processing_notes: string; warnings: { row: number; roll: string; issues: string[] }[]; created_at: string };
@@ -191,7 +191,7 @@ export default function Desk({ initialView }: { initialView: View }) {
       <a className={'navitem ' + (initialView === 'upload' ? 'active' : '')} href="/upload"><Upload size={17} />Upload workspace</a>
       <a className={'navitem ' + (initialView === 'mail' ? 'active' : '')} href="/mail"><Files size={17} />Mail workflow</a>
       <a className={'navitem ' + (initialView === 'guide' ? 'active' : '')} href="/guide"><Sparkles size={17} />Agent workflow</a>
-      {session.role === 'admin' && <a className={'navitem ' + (initialView === 'admin' ? 'active' : '')} href="/admin"><SlidersHorizontal size={17} />Owner settings</a>}
+      {session.role === 'admin' && session.owner_entry_path && <a className={'navitem ' + (initialView === 'admin' ? 'active' : '')} href={session.owner_entry_path}><SlidersHorizontal size={17} />Owner settings</a>}
     </nav></div></aside>}
     <div className="workspace"><header className="topbar">
       {authorised ? <div className="breadcrumbs"><span>Workspace</span><ChevronRight size={11} /><strong>{labels[initialView]}</strong></div> : brand}

@@ -21,4 +21,4 @@ if (process.argv.includes('--local')) {
 }
 console.log('\nSave this private owner key in your password manager. It is shown once:');
 console.log(key);
-console.log('\nUse it at /admin. Create a separate uploader key there for Gemini.');
+console.log('\nUse it at your configured owner entry URL. Run npm run setup:entry (with -- --local for local development) to create an entry path if needed. Create a separate uploader key there for Gemini.');

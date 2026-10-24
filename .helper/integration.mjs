@@ -8,11 +8,12 @@ const origin = 'http://127.0.0.1:8788';
 const ownerKey = 'own_' + randomBytes(32).toString('base64url');
 const ownerHash = createHash('sha256').update(ownerKey).digest('hex');
 const state = '.wrangler/integration';
+const ownerEntry = '/gate/' + 'f'.repeat(48);
 rmSync(state, { recursive: true, force: true });
 const cli = 'node_modules/wrangler/bin/wrangler.js';
 const migrated = spawnSync(process.execPath, [cli, 'd1', 'migrations', 'apply', 'DB', '--local', '--persist-to', state], { encoding: 'utf8' });
 if (migrated.status !== 0) throw new Error(migrated.stdout + migrated.stderr);
-const server = spawn(process.execPath, [cli, 'dev', '--local', '--test-scheduled', '--ip', '127.0.0.1', '--port', '8788', '--persist-to', state, '--var', 'ADMIN_KEY_SHA256:' + ownerHash], { stdio: ['ignore', 'pipe', 'pipe'] });
+const server = spawn(process.execPath, [cli, 'dev', '--local', '--test-scheduled', '--ip', '127.0.0.1', '--port', '8788', '--persist-to', state, '--var', 'ADMIN_KEY_SHA256:' + ownerHash, '--var', 'OWNER_ENTRY_PATH:' + ownerEntry], { stdio: ['ignore', 'pipe', 'pipe'] });
 let logs = '';
 for (const stream of [server.stdout, server.stderr]) stream.on('data', chunk => { logs = (logs + chunk).slice(-12000); });
 try {
@@ -32,6 +33,15 @@ async function call(path, { method = 'GET', owner = false, key = false, data, ex
   assert.equal(response.status, expected, `${method} ${path}: ${typeof result === 'object' ? result.error : response.status}`); count++;
   return { result, response };
 }
+const oldOwnerPage = await fetch(origin + '/admin', { headers: { Connection: 'close' }, redirect: 'manual' });
+assert.equal(oldOwnerPage.status, 404); count++;
+const wrongOwnerPage = await fetch(origin + '/gate/not-the-owner-entry', { headers: { Connection: 'close' } });
+assert.equal(wrongOwnerPage.status, 404); count++;
+const ownerPage = await fetch(origin + ownerEntry, { headers: { Connection: 'close' } });
+assert.equal(ownerPage.status, 200); assert.match(await ownerPage.text(), /data-owner-entry="true"/);
+assert.equal(ownerPage.headers.get('Cache-Control'), 'no-store'); assert.equal(ownerPage.headers.get('X-Robots-Tag'), 'noindex, nofollow'); count++;
+assert.equal((await call('me')).result.owner_entry_path, undefined);
+const publicPage = await fetch(origin + '/', { headers: { Connection: 'close' } }); assert.equal((await publicPage.text()).includes(ownerEntry), false); count++;
 const signin = await call('session', { method: 'POST', data: { key: ownerKey } });
 ownerCookie = signin.response.headers.getSetCookie().map(cookie => cookie.split(';')[0]).join('; ');
 assert.match(ownerCookie, /^shortlist_session=/);
@@ -39,6 +49,7 @@ const spoofed = await fetch(origin + '/api/v1/me', { headers: { Connection: 'clo
 assert.equal((await spoofed.json()).role, 'public', 'Untrusted identity headers must never authorize the owner'); count++;
 await call('session', { method: 'POST', data: { key: 'own_' + 'a'.repeat(43) }, expected: 401 });
 assert.equal((await call('me', { owner: true })).result.role, 'admin');
+assert.equal((await call('me', { owner: true })).result.owner_entry_path, ownerEntry);
 await call('master', { expected: 401 });
 await call('uploads', { expected: 401 });
 await call('keys', { expected: 401 });
@@ -48,6 +59,7 @@ const rows = [{ name: 'Synthetic Test A', roll: '0230001', programme: 'BTech', b
 const master = (await call('master', { method: 'PUT', owner: true, data: { name: 'Synthetic QA master', rows }, expected: 201 })).result;
 const key = (await call('keys', { method: 'POST', owner: true, data: { label: 'Temporary local QA key', expires_in_days: 1 }, expected: 201 })).result;
 uploaderKey = key.key;
+assert.equal((await call('me', { key: true })).result.owner_entry_path, undefined);
 const readMaster = (await call('master', { key: true })).result;
 assert.deepEqual(readMaster.rows, rows); assert.equal(readMaster.rows[0].roll, '0230001');
 await call('keys', { key: true, expected: 403 });

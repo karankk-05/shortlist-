@@ -218,7 +218,7 @@ export async function handle(request: Request): Promise<Response> {
     if (method === 'GET' && resource === 'openapi.json') return json(openapi(url.origin));
     if (method === 'GET' && resource === 'me') {
       const user = await actor(request);
-      return json({ role: user?.role || 'public', label: user?.label || null, owner_configured: /^[a-f0-9]{64}$/.test(env.ADMIN_KEY_SHA256 || '') });
+      return json({ role: user?.role || 'public', label: user?.label || null, owner_configured: /^[a-f0-9]{64}$/.test(env.ADMIN_KEY_SHA256 || ''), ...(user?.role === 'admin' ? { owner_entry_path: env.OWNER_ENTRY_PATH || null } : {}) });
     }
     if (resource === 'session' && method === 'POST') {
       const input = await body(request), token = string(input.key, 'Access key', 100, true); const user = await keyActor(token);

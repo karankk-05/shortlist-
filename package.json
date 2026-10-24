@@ -18,7 +18,8 @@
     "setup:cloudflare": "node .helper/setup-cloudflare.mjs",
     "setup:owner": "node .helper/setup-owner.mjs",
     "setup:mail": "node .helper/setup-mail.mjs",
-    "backup": "node .helper/backup.mjs"
+    "backup": "node .helper/backup.mjs",
+    "setup:entry": "node .helper/setup-owner-entry.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.31.0",

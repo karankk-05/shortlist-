@@ -12,13 +12,13 @@ name, roll, programme, branch, cpi, email
 
 Rolls remain text; missing CPI stays blank/null, distinct from zero. Candidate order is preserved. Published lists are publicly viewable and downloadable. The master, originals, drafts, keys and processing notes require authentication.
 
-The public interface contains the company shortlist index and student tables, with an **Owner login** link. Workspace navigation, upload controls, downloads and version management appear only after login. The login uses a plain text **Enter key** field: paste the portal owner key generated during setup and press Enter. Authorized uploader agents can still sign in at `/upload` or `/mail` with their separate uploader key.
+The public interface contains the company shortlist index and student tables, without owner login links. Workspace navigation, upload controls, downloads and version management appear only after login. The login uses a plain text **Enter key** field: paste the portal owner key generated during setup and press Enter. Authorized uploader agents can still sign in at `/upload` or `/mail` with their separate uploader key.
 
 CPI cells initially display `...`. One **Show CPI / Hide CPI** eye button above the student table controls every student in that shortlist, including other pages and filtered results. Revealed missing values display `—`. Reloading or opening another shortlist hides values again. This is a display preference, not an access restriction: the published data and public export API remain accessible. The public library keeps its shortlist/entry/latest-addition statistics; company pages show shortlisted students, CPI availability and Date added.
 
 Company shortlist views include search and sorting, with a **Filters** button for programme, branch, batch, CPI availability and inclusive minimum/maximum CPI filters. Sort any column using its heading or the sort menu. Missing values stay last in both sort directions. **Original shortlist order** and **Reset view** restore the source ordering. These controls affect the displayed view; stored versions and the complete CSV/Excel downloads retain their original order.
 
-The site opens in **dark mode** by default. The header theme toggle offers light mode and remembers the browser preference across reloads and tabs; theme initialization runs before paint without inline scripts. Nested company/round/role sections and student filters animate smoothly in both directions, keep closed content out of keyboard/accessibility navigation, and respect reduced-motion preferences. Public pages have no owner login link. Bookmark **https://shortlist-desk.shortlists.workers.dev/admin** for the owner key login; authentication and private API permissions remain unchanged.
+The site opens in **dark mode** by default. The header theme toggle offers light mode and remembers the browser preference across reloads and tabs; theme initialization runs before paint without inline scripts. Nested company/round/role sections and student filters animate smoothly in both directions, keep closed content out of keyboard/accessibility navigation, and respect reduced-motion preferences. Public pages have no owner login link. Owner login uses a random, server-configured entry URL. The old `/admin` route returns 404. The entry path is kept out of public bundles and public/uploader API responses; the existing owner key remains required.
 
 The dashboard groups company names on the server, including case, spacing, punctuation and common legal-suffix variants; it does not fuzzy-match unrelated company names. The dashboard is a collapsible hierarchy: **Company → Round → Role → Shortlists**. Each level can be opened or closed independently. Company, round and role sections start collapsed; search and round filtering open matching paths automatically. Company, round and role groups are ordered by their latest **Date added**; shortlist events remain newest first. The round filter combines Test / Technical Test / Online Aptitude Test / OA / assessment as **Test**, interview variants as **Interview**, and GD / Group Discussion as **Group Discussion**. Buddy rounds and other stages stay distinct. Exact source round labels, event dates/times, seasons, candidate lists and IDs are retained. A combined GD / Interview source appears once under **Group Discussion + Interview** and is reachable from either filter. Unknown round labels are preserved. This is a read-only server view, automatically reflecting existing and newly published lists; agent prompts and stored identities are unchanged. `GET /api/v1/shortlists?grouped=1` adds `company_groups` and `round_categories`; the default flat API response stays unchanged.
 
@@ -129,6 +129,7 @@ npx wrangler login
 npm run setup:cloudflare
 npm run deploy
 npm run setup:owner
+npm run setup:entry
 ```
 
 1. Approve Cloudflare's authorization page opened by `wrangler login`.
@@ -136,7 +137,7 @@ npm run setup:owner
 3. `deploy` prints the HTTPS address, such as `https://shortlist-desk.<your-subdomain>.workers.dev`. Choose the free Workers subdomain if prompted. Owner access remains locked until the next step.
 4. `setup:owner` generates a random 256-bit owner key and sends **only its SHA-256 hash** to Cloudflare's secret store. It prints the private key once in your terminal. Save it in a password manager. Do not share this owner key with AI agents or GitHub. Rerunning rotates owner access and invalidates prior owner sessions.
 
-Open `/admin` on the new site and sign in with that key. Import your reviewed single-sheet student master. The importer stores only the six supported columns, even if the master has extra review columns. Import it through the private website; never put student data in this public repository.
+The entry path is saved in the ignored `private/owner-entry-path.txt`. Append it to your site origin and bookmark that URL. Sign in there with the owner key. Import your reviewed single-sheet student master. The importer stores only the six supported columns, even if the master has extra review columns. Import it through the private website; never put student data in this public repository.
 
 This repository is configured for the owner's existing Cloudflare database. When deploying a fork to another account, reset `database_id` in `wrangler.jsonc` to `00000000-0000-0000-0000-000000000000` before running setup, so it creates a database in that account.
 
@@ -203,7 +204,7 @@ npm run setup:owner -- --local
 npm run dev
 ```
 
-Use the generated local key at `http://localhost:8787/admin`. Local D1 is isolated from cloud data. The dev command rebuilds the frontend, applies local migrations, then runs Wrangler; restart after source edits.
+Run `npm run setup:entry -- --local`, then use the generated local key at the local origin plus the path in `private/owner-entry-path.local.txt`. Local D1 is isolated from cloud data. The dev command rebuilds the frontend, applies local migrations, then runs Wrangler; restart after source edits.
 
 ```bash
 npm run typecheck
