@@ -1,10 +1,14 @@
 import { handle } from '../lib/server';
 import { agentGuide } from '../lib/agent-guide';
+import { mailGuide } from '../lib/mail-guide';
 
 export default {
   async fetch(request: Request, env: Cloudflare.Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === '/agent') return new Response(agentGuide(url.origin), {
+      headers: { 'Content-Type': 'text/markdown; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' },
+    });
+    if (url.pathname === '/mail-agent') return new Response(mailGuide(url.origin), {
       headers: { 'Content-Type': 'text/markdown; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' },
     });
     if (url.pathname.startsWith('/api/')) return handle(request);

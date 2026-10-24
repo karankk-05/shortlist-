@@ -1,11 +1,14 @@
 import { env } from 'cloudflare:workers';
 import { objectStore } from './object-store';
 import { agentGuide } from './agent-guide';
+import { mailGuide } from './mail-guide';
+import { mailConfig, mailHash, mailLease, mailStatus, saveMail, syncMail } from './mail-service';
+import { validateMailConfig } from './mail-content';
 import { COLUMNS, csvRows, InputError, StudentRow, toCSV, validateRows } from './records';
 
 type Actor = { role: 'admin' | 'uploader'; id: string; label: string };
 type List = { id: string; company: string; role: string; round: string; season: string; notes: string; published_version_id: string | null; created_at: string; updated_at: string };
-type Version = { id: string; shortlist_id: string; number: number; object_key: string; row_count: number; master_id: string; processing_notes: string; warnings: string; source_upload_ids: string; created_at: string; published_at: string | null };
+type Version = { id: string; shortlist_id: string; number: number; object_key: string; row_count: number; master_id: string; processing_notes: string; warnings: string; source_upload_ids: string; created_at: string; published_at: string | null; source_mail_job_id: string | null };
 type Master = { id: string; name: string; object_key: string; row_count: number; cpi_count: number; created_at: string; source_hash: string };
 type Data = Record<string, unknown>;
 const db = () => { if (!env.DB) throw new InputError('Database is not connected yet.', 503); return env.DB; };
@@ -112,6 +115,11 @@ async function createDraft(request: Request, listId?: string) {
   const processingNotes = string(input.processing_notes, 'processing_notes', 24000);
   if (input.source_upload_ids !== undefined && (!Array.isArray(input.source_upload_ids) || input.source_upload_ids.length > 20 || input.source_upload_ids.some(value => typeof value !== 'string' || value.length > 80))) throw new InputError('Invalid source_upload_ids.');
   const sourceIds = (input.source_upload_ids || []) as string[];
+  const mailJobId = string(input.mail_job_id, 'mail_job_id', 80);
+  if (mailJobId) {
+    const job = await mailLease(db(), mailJobId, input.mail_lease_token);
+    if ((JSON.parse(job.source_upload_ids) as string[]).some(value => !sourceIds.includes(value))) throw new InputError('Link every attachment from this mail job in source_upload_ids, including any you explain as irrelevant in processing_notes.');
+  }
   for (const sourceId of sourceIds) if (!(await db().prepare('SELECT id FROM uploads WHERE id = ?').bind(sourceId).first())) throw new InputError('A source upload does not exist.');
   let list: List; let number = 1;
   if (listId) {
@@ -129,7 +137,7 @@ async function createDraft(request: Request, listId?: string) {
   try {
     const statements = [];
     if (!listId) statements.push(db().prepare('INSERT INTO shortlists (id, company, role, round, season, notes, created_at, updated_at, published_version_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)').bind(list.id, list.company, list.role, list.round, list.season, list.notes, list.created_at, list.updated_at));
-    statements.push(db().prepare('INSERT INTO versions (id, shortlist_id, number, object_key, row_count, master_id, created_at, created_by, processing_notes, warnings, source_upload_ids, published_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)').bind(versionId, list.id, number, key, rows.length, masterId, createdAt, user.id, processingNotes, JSON.stringify(warnings), JSON.stringify(sourceIds)));
+    statements.push(db().prepare('INSERT INTO versions (id, shortlist_id, number, object_key, row_count, master_id, created_at, created_by, processing_notes, warnings, source_upload_ids, published_at, source_mail_job_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)').bind(versionId, list.id, number, key, rows.length, masterId, createdAt, user.id, processingNotes, JSON.stringify(warnings), JSON.stringify(sourceIds), mailJobId || null));
     statements.push(db().prepare('UPDATE shortlists SET updated_at = ? WHERE id = ?').bind(createdAt, list.id));
     await db().batch(statements);
   } catch (error) {
@@ -144,6 +152,7 @@ async function createDraft(request: Request, listId?: string) {
 async function publish(request: Request, listId: string, restore = false) {
   const user = await access(request, restore); const input = await body(request); const list = await findList(listId);
   const version = await findVersion(string(input.version_id, 'version_id', 80, true), listId);
+  if (version.source_mail_job_id && user.role !== 'admin') await mailLease(db(), version.source_mail_job_id, input.mail_lease_token);
   if (!Object.hasOwn(input, 'expected_current_version_id') || input.expected_current_version_id !== list.published_version_id) throw new InputError('The published version changed. Refresh before publishing.', 409);
   if (restore && !version.published_at) throw new InputError('Restore an already-published version.');
   const warnings = JSON.parse(version.warnings);
@@ -181,6 +190,7 @@ export async function handle(request: Request): Promise<Response> {
     const [resource, item, action] = parts;
     if (method === 'GET' && resource === 'health') return json({ status: 'ok', service: 'shortlist-desk', version: 1, merging: 'external-agent' });
     if (method === 'GET' && resource === 'agent') return plain(agentGuide(url.origin), 'text/markdown; charset=utf-8');
+    if (method === 'GET' && resource === 'mail-agent') return plain(mailGuide(url.origin), 'text/markdown; charset=utf-8');
     if (method === 'GET' && resource === 'openapi.json') return json(openapi(url.origin));
     if (method === 'GET' && resource === 'me') {
       const user = await actor(request);
@@ -193,6 +203,74 @@ export async function handle(request: Request): Promise<Response> {
       return json({ role: user.role, label: user.label }, 200, { 'Set-Cookie': `shortlist_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=28800${secure}` });
     }
     if (resource === 'session' && method === 'DELETE') return json({ ok: true }, 200, { 'Set-Cookie': `shortlist_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${url.protocol === 'https:' ? '; Secure' : ''}` });
+    if (resource === 'mail') {
+      const user = await access(request);
+      if (method === 'GET' && item === 'status') return json(await mailStatus(db(), env, user.role === 'admin'));
+      if (method === 'PUT' && item === 'config') {
+        await access(request, true);
+        if (await db().prepare('SELECT account_id FROM mail_state WHERE lock_until > ? LIMIT 1').bind(now()).first()) throw new InputError('Wait for the current mail sync to finish before changing settings.', 409);
+        const config = validateMailConfig(await body(request));
+        await db().batch([
+          db().prepare("INSERT INTO settings (key, value) VALUES ('mail_config', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").bind(JSON.stringify(config)),
+          db().prepare('UPDATE mail_state SET last_uid = 0, uid_validity = NULL WHERE lock_until IS NULL OR lock_until < ?').bind(now()),
+        ]);
+        await log('mail_configured', user.id, 'mail'); return json({ config });
+      }
+      if (method === 'POST' && item === 'sync') { const result = await syncMail(db(), env); await log('mail_synced', user.id, 'mail'); return json(result); }
+      if (method === 'POST' && item === 'import') {
+        await access(request, true);
+        if (!request.headers.get('Content-Type')?.startsWith('message/rfc822')) throw new InputError('Send an EML message as message/rfc822.');
+        const raw = await limited(request, 10 * 1024 * 1024); if (!raw.length) throw new InputError('The message is empty.');
+        const result = await saveMail(db(), raw, { account: 'owner-import', validity: 'manual', uid: 0, config: await mailConfig(db()) });
+        await log('mail_imported', user.id, 'mail'); return json(result, 201);
+      }
+      throw new InputError('Mail endpoint not found.', 404);
+    }
+    if (resource === 'mail-jobs') {
+      const user = await access(request);
+      const fields = 'id, subject, sender, received_at, status, note, duplicate_of, lease_until, result_version_ids, created_at, updated_at';
+      if (method === 'GET' && !item) {
+        const status = url.searchParams.get('status') || 'pending';
+        if (!['pending', 'processing', 'needs_review', 'done', 'ignored', 'all'].includes(status)) throw new InputError('Invalid mail job status.');
+        const limit = Math.floor(Math.min(50, Math.max(1, Number(url.searchParams.get('limit')) || 20)));
+        const where = status === 'all' ? '' : status === 'pending' ? "WHERE status = 'pending' OR (status = 'processing' AND lease_until <= ?)" : 'WHERE status = ?';
+        const query = db().prepare(`SELECT ${fields} FROM mail_jobs ${where} ORDER BY created_at ASC LIMIT ?`);
+        const result = await (status === 'all' ? query.bind(limit) : query.bind(status === 'pending' ? now() : status, limit)).all();
+        return json({ jobs: result.results.map(row => ({ ...row, result_version_ids: JSON.parse(row.result_version_ids as string) })), limit });
+      }
+      if (method === 'GET' && item && !action) {
+        const job = await db().prepare(`SELECT ${fields}, object_key, source_upload_ids FROM mail_jobs WHERE id = ?`).bind(item).first<Record<string, unknown>>();
+        if (!job) throw new InputError('Mail job not found.', 404);
+        const object = await bucket().get(job.object_key as string); if (!object) throw new InputError('Mail source is unavailable.', 503);
+        const versions = await db().prepare('SELECT v.id, v.shortlist_id, v.number, v.row_count, v.published_at, s.company, s.role, s.round, s.season, s.published_version_id, s.deleted_at FROM versions v JOIN shortlists s ON s.id = v.shortlist_id WHERE v.source_mail_job_id = ? ORDER BY v.created_at').bind(item).all();
+        const { object_key: _key, ...metadata } = job;
+        return json({ job: { ...metadata, result_version_ids: JSON.parse(job.result_version_ids as string), source_upload_ids: JSON.parse(job.source_upload_ids as string) }, source: await object.json(), versions: versions.results });
+      }
+      if (method === 'POST' && item && action === 'claim') {
+        const token = id(), time = now(), until = new Date(Date.now() + 7200000).toISOString();
+        const result = await db().prepare("UPDATE mail_jobs SET status = 'processing', claimed_by = ?, lease_hash = ?, lease_until = ?, updated_at = ? WHERE id = ? AND (status = 'pending' OR (status = 'processing' AND lease_until <= ?))").bind(user.id, await mailHash(token), until, time, item, time).run();
+        if (result.meta.changes !== 1) throw new InputError('Job is already claimed, finished or awaiting review. Refresh the queue.', 409);
+        await log('mail_job_claimed', user.id, item); return json({ id: item, lease_token: token, lease_until: until });
+      }
+      if (method === 'POST' && item && ['complete', 'review', 'ignore'].includes(action)) {
+        const input = await body(request); await mailLease(db(), item, input.lease_token);
+        const note = string(input.note, 'Processing note', 24000, action !== 'complete');
+        const versions = await db().prepare('SELECT v.id, v.published_at, s.published_version_id, s.deleted_at FROM versions v JOIN shortlists s ON s.id = v.shortlist_id WHERE v.source_mail_job_id = ?').bind(item).all<{ id: string; published_at: string | null; published_version_id: string | null; deleted_at: string | null }>();
+        if (action === 'complete' && (!versions.results.length || versions.results.some(version => !version.published_at || version.deleted_at || version.published_version_id !== version.id))) throw new InputError('Every draft linked to this mail job must be the current public version before completion. Otherwise mark the job for review.');
+        if (action === 'ignore' && versions.results.length) throw new InputError('This mail job already has draft or published results. Mark it for review instead.');
+        const status = action === 'complete' ? 'done' : action === 'review' ? 'needs_review' : 'ignored';
+        const result = await db().prepare("UPDATE mail_jobs SET status = ?, note = ?, result_version_ids = ?, lease_hash = NULL, lease_until = NULL, claimed_by = NULL, updated_at = ? WHERE id = ? AND status = 'processing' AND lease_hash = ? AND lease_until > ?").bind(status, note, JSON.stringify(versions.results.filter(version => version.published_at).map(version => version.id)), now(), item, await mailHash(input.lease_token as string), now()).run();
+        if (result.meta.changes !== 1) throw new InputError('The job lease changed. Refresh before retrying.', 409);
+        await log('mail_job_' + status, user.id, item); return json({ id: item, status });
+      }
+      if (method === 'POST' && item && action === 'retry') {
+        await access(request, true);
+        const result = await db().prepare("UPDATE mail_jobs SET status = 'pending', lease_hash = NULL, lease_until = NULL, claimed_by = NULL, updated_at = ? WHERE id = ? AND status IN ('needs_review','ignored')").bind(now(), item).run();
+        if (result.meta.changes !== 1) throw new InputError('Only a reviewed or ignored job can be retried.', 409);
+        await log('mail_job_retried', user.id, item); return json({ id: item, status: 'pending' });
+      }
+      throw new InputError('Mail job endpoint not found.', 404);
+    }
     if (resource === 'master' && method === 'PUT') return await writeMaster(request);
     if ((resource === 'master' || resource === 'master.csv') && method === 'GET') {
       await access(request); const master = await currentMaster(); if (!master) throw new InputError('No master has been imported yet.', 404);
@@ -280,19 +358,32 @@ function openapi(origin: string) {
   const ownerOnly = [{ OwnerKey: [] }];
   const student = { type: 'object', additionalProperties: false, required: COLUMNS, properties: Object.fromEntries(COLUMNS.map(key => [key, key === 'cpi' ? { type: ['number', 'null'], minimum: 0, maximum: 10 } : { type: 'string' }])) };
   const response = { '200': { description: 'Success' }, '400': { description: 'Invalid input' }, '401': { description: 'Access key or owner session required' }, '403': { description: 'Owner access required' }, '404': { description: 'Not found or deleted' }, '409': { description: 'Concurrent update or duplicate shortlist' } };
-  const draft = { type: 'object', properties: { company: { type: 'string' }, role: { type: 'string' }, round: { type: 'string' }, season: { type: 'string' }, master_id: { type: 'string' }, rows: { type: 'array', items: student }, csv_text: { type: 'string' }, processing_notes: { type: 'string' }, source_upload_ids: { type: 'array', items: { type: 'string' } }, expected_latest_version_id: { type: ['string', 'null'] } }, required: ['master_id'] };
+  const draft = { type: 'object', properties: { company: { type: 'string' }, role: { type: 'string' }, round: { type: 'string' }, season: { type: 'string' }, master_id: { type: 'string' }, rows: { type: 'array', items: student }, csv_text: { type: 'string' }, processing_notes: { type: 'string' }, source_upload_ids: { type: 'array', items: { type: 'string' } }, expected_latest_version_id: { type: ['string', 'null'] }, mail_job_id: { type: 'string' }, mail_lease_token: { type: 'string' } }, required: ['master_id'] };
   const bodySchema = (schema: unknown) => ({ required: true, content: { 'application/json': { schema } } });
   const parameter = { name: 'id', in: 'path', required: true, schema: { type: 'string' } };
   const deleteBody = bodySchema({ type: 'object', required: ['expected_updated_at'], properties: { expected_updated_at: { type: 'string', description: 'updated_at from the latest shortlist metadata, to reject stale changes.' } } });
+  const mailAction = bodySchema({ type: 'object', required: ['lease_token'], properties: { lease_token: { type: 'string' }, note: { type: 'string' } } });
   return { openapi: '3.1.0', info: { title: 'Shortlist Desk', version: '1.0.0', description: 'Gemini performs interpretation and merging. The portal validates, stores and publishes exact six-column results.' }, servers: [{ url: origin + '/api/v1' }], components: { securitySchemes: { UploaderKey: { type: 'http', scheme: 'bearer', description: 'Revocable uploader key issued by the owner.' }, OwnerKey: { type: 'http', scheme: 'bearer', description: 'Private owner key. Uploader keys cannot delete or restore shortlists.' } }, schemas: { Student: student } }, paths: {
     '/health': { get: { operationId: 'health', summary: 'Health check', responses: response } },
+    '/mail-agent': { get: { operationId: 'mailAgentGuide', summary: 'Public workflow instructions without mailbox data', responses: response } },
+    '/mail/status': { get: { operationId: 'mailStatus', summary: 'Private mailbox connection state and configuration; never returns the password', security: secured, responses: response } },
+    '/mail/config': { put: { operationId: 'configureMail', summary: 'Owner only: mailbox folder, lookback, sender and link-domain rules', security: ownerOnly, requestBody: bodySchema({ type: 'object', required: ['enabled','folder','lookback_days','senders','link_domains'], properties: { enabled: { type: 'boolean' }, folder: { type: 'string' }, lookback_days: { type: 'integer', minimum: 1, maximum: 365 }, senders: { type: 'array', items: { type: 'string' } }, link_domains: { type: 'array', items: { type: 'string' } } } }), responses: response } },
+    '/mail/sync': { post: { operationId: 'syncMail', summary: 'Read matching mail into a private queue; repeat while more is true', security: secured, responses: { ...response, '502': { description: 'IITK IMAP sync failed' }, '503': { description: 'Mail credentials have not been configured' } } } },
+    '/mail/import': { post: { operationId: 'importOwnMail', summary: 'Owner only: import an owned EML message for testing or manual ingestion', security: ownerOnly, requestBody: { required: true, content: { 'message/rfc822': { schema: { type: 'string', format: 'binary' } } } }, responses: { ...response, '201': { description: 'Queued, duplicate or sender-filtered message' } } } },
+    '/mail-jobs': { get: { operationId: 'listMailJobs', summary: 'Private queue; pending includes expired job claims', security: secured, parameters: [{ name: 'status', in: 'query', schema: { type: 'string', enum: ['pending','processing','needs_review','done','ignored','all'], default: 'pending' } }, { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 50 } }], responses: response } },
+    '/mail-jobs/{id}': { parameters: [parameter], get: { operationId: 'readMailJob', summary: 'Private email text, attachments, links and previously prepared results', security: secured, responses: response } },
+    '/mail-jobs/{id}/claim': { parameters: [parameter], post: { operationId: 'claimMailJob', summary: 'Exclusively claim a pending/expired job for two hours; returns lease_token once', security: secured, responses: response } },
+    '/mail-jobs/{id}/complete': { parameters: [parameter], post: { operationId: 'completeMailJob', summary: 'Complete a claimed job after every linked result is currently published', security: secured, requestBody: mailAction, responses: response } },
+    '/mail-jobs/{id}/review': { parameters: [parameter], post: { operationId: 'reviewMailJob', summary: 'Leave an unresolved job for owner review; note is required', security: secured, requestBody: mailAction, responses: response } },
+    '/mail-jobs/{id}/ignore': { parameters: [parameter], post: { operationId: 'ignoreMailJob', summary: 'Ignore an irrelevant claimed email with an explanation', security: secured, requestBody: mailAction, responses: response } },
+    '/mail-jobs/{id}/retry': { parameters: [parameter], post: { operationId: 'retryMailJob', summary: 'Owner only: requeue a reviewed/ignored source', security: ownerOnly, responses: response } },
     '/shortlists': { get: { operationId: 'listShortlists', summary: 'List published shortlists', parameters: [{ name: 'include_drafts', in: 'query', schema: { type: 'integer', enum: [1] }, description: 'Requires authentication when set.' }], responses: response }, post: { operationId: 'createShortlistDraft', summary: 'Create a shortlist and its first draft', security: secured, requestBody: bodySchema(draft), responses: { ...response, '201': { description: 'Draft created; not public until published' } } } },
     '/shortlists/{id}': { parameters: [parameter], get: { operationId: 'readShortlist', summary: 'Read current published six-column rows', responses: response }, delete: { operationId: 'deleteShortlist', summary: 'Owner only: hide a shortlist and retain its versions for recovery', security: ownerOnly, requestBody: deleteBody, responses: response } },
     '/shortlists/deleted': { get: { operationId: 'listDeletedShortlists', summary: 'Owner only: list deleted shortlists', security: ownerOnly, responses: response } },
     '/shortlists/{id}/undelete': { parameters: [parameter], post: { operationId: 'undeleteShortlist', summary: 'Owner only: restore a deleted shortlist and its previous publication', security: ownerOnly, requestBody: deleteBody, responses: response } },
     '/shortlists/{id}/export.csv': { parameters: [parameter], get: { operationId: 'downloadShortlist', summary: 'Download published CSV', responses: response } },
     '/shortlists/{id}/versions': { parameters: [parameter], get: { operationId: 'listVersions', security: secured, responses: response }, post: { operationId: 'createVersion', security: secured, requestBody: bodySchema(draft), responses: response } },
-    '/shortlists/{id}/publish': { parameters: [parameter], post: { operationId: 'publishVersion', security: secured, requestBody: bodySchema({ type: 'object', required: ['version_id', 'expected_current_version_id'], properties: { version_id: { type: 'string' }, expected_current_version_id: { type: ['string', 'null'] }, acknowledge_warnings: { type: 'boolean' } } }), responses: response } },
+    '/shortlists/{id}/publish': { parameters: [parameter], post: { operationId: 'publishVersion', security: secured, requestBody: bodySchema({ type: 'object', required: ['version_id', 'expected_current_version_id'], properties: { version_id: { type: 'string' }, expected_current_version_id: { type: ['string', 'null'] }, acknowledge_warnings: { type: 'boolean' }, mail_lease_token: { type: 'string', description: 'Required for uploader publication of a mail-linked version.' } } }), responses: response } },
     '/master': { get: { operationId: 'readPrivateMaster', security: secured, summary: 'Read current master metadata and rows', responses: response } },
     '/master/info': { get: { operationId: 'readMasterInfo', security: secured, responses: response } },
     '/master.csv': { get: { operationId: 'downloadPrivateMaster', security: secured, responses: response } },

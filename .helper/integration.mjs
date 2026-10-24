@@ -24,8 +24,8 @@ try {
   }
   if (!ready) throw new Error('Preview failed to start: ' + logs);
 let ownerCookie = '', uploaderKey = '', count = 0;
-async function call(path, { method = 'GET', owner = false, key = false, data, expected = 200, cookie, evil = false, form } = {}) {
-  const response = await fetch(origin + '/api/v1/' + path, { method, headers: { ...(owner ? { Cookie: ownerCookie } : cookie ? { Cookie: cookie } : {}), ...(key ? { Authorization: `Bearer ${uploaderKey}` } : {}), ...(data ? { 'Content-Type': 'application/json' } : {}), ...(method !== 'GET' ? { Origin: evil ? 'https://evil.example.invalid' : origin } : {}) }, body: form || (data ? JSON.stringify(data) : undefined), redirect: 'manual' });
+async function call(path, { method = 'GET', owner = false, key = false, data, expected = 200, cookie, evil = false, form, raw } = {}) {
+  const response = await fetch(origin + '/api/v1/' + path, { method, headers: { ...(owner ? { Cookie: ownerCookie } : cookie ? { Cookie: cookie } : {}), ...(key ? { Authorization: `Bearer ${uploaderKey}` } : {}), ...(raw ? { 'Content-Type': 'message/rfc822' } : data ? { 'Content-Type': 'application/json' } : {}), ...(method !== 'GET' ? { Origin: evil ? 'https://evil.example.invalid' : origin } : {}) }, body: raw || form || (data ? JSON.stringify(data) : undefined), redirect: 'manual' });
   const result = response.headers.get('Content-Type')?.includes('application/json') ? await response.json() : await response.text();
   assert.equal(response.status, expected, `${method} ${path}: ${typeof result === 'object' ? result.error : response.status}`); count++;
   return { result, response };
@@ -116,9 +116,59 @@ const privateRemoved = (await call('shortlists/' + privateList.id, { method: 'DE
 await call('shortlists/' + privateList.id + '/undelete', { method: 'POST', owner: true, data: { expected_updated_at: privateRemoved.updated_at } });
 await call('shortlists/' + privateList.id, { expected: 404 });
 assert.equal((await call('shortlists?include_drafts=1', { owner: true })).result.shortlists.some(list => list.id === privateList.id), true);
+await call('mail/status', { expected: 401 });
+await call('mail-jobs', { expected: 401 });
+assert.equal((await call('mail/status', { key: true })).result.configured, false);
+await call('mail/sync', { method: 'POST', key: true, data: {}, expected: 503 });
+const mailConfig = { enabled: true, folder: 'INBOX', lookback_days: 30, senders: [], link_domains: ['iitk.ac.in','docs.google.com'] };
+await call('mail/config', { method: 'PUT', key: true, data: mailConfig, expected: 403 });
+await call('mail/config', { method: 'PUT', owner: true, data: mailConfig });
+const eml = 'From: Placement <placement@example.invalid>\r\nSubject: Synthetic shortlist notice\r\nMessage-ID: <mail-qa@example.invalid>\r\nDate: Sat, 24 Oct 2026 10:00:00 +0530\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="qa"\r\n\r\n--qa\r\nContent-Type: text/plain\r\n\r\nSynthetic shortlist. https://docs.google.com/spreadsheets/d/synthetic https://iitk.ac.in.evil.example/sheet\r\n--qa\r\nContent-Type: text/csv\r\nContent-Disposition: attachment; filename="synthetic-mail.csv"\r\n\r\nname,roll\r\nSynthetic Test A,0230001\r\n--qa--\r\n';
+await call('mail/import', { method: 'POST', key: true, raw: eml, expected: 403 });
+const mail = (await call('mail/import', { method: 'POST', owner: true, raw: eml, expected: 201 })).result;
+assert.equal(mail.status, 'pending');
+assert.equal((await call('mail/import', { method: 'POST', owner: true, raw: eml, expected: 201 })).result.duplicate, true);
+const duplicateMail = (await call('mail/import', { method: 'POST', owner: true, raw: eml.replace('mail-qa@','mail-qa-second@'), expected: 201 })).result;
+assert.equal(duplicateMail.status, 'needs_review');
+await call('mail-jobs/' + mail.id, { expected: 401 });
+const mailDetail = (await call('mail-jobs/' + mail.id, { key: true })).result;
+assert.match(mailDetail.source.text, /Synthetic shortlist/);
+assert.equal(mailDetail.source.links[0].allowed, true); assert.equal(mailDetail.source.links[1].allowed, false);
+assert.equal(mailDetail.source.attachments.length, 1);
+assert.equal(JSON.stringify(mailDetail).includes('lease_hash'), false);
+await call('uploads/' + mailDetail.source.attachments[0].id, { expected: 401 });
+assert.match((await call('uploads/' + mailDetail.source.attachments[0].id, { key: true })).result, /Synthetic Test A/);
+assert.equal((await call('mail-jobs', { key: true })).result.jobs.length, 1);
+const claim = (await call(`mail-jobs/${mail.id}/claim`, { method: 'POST', key: true, data: {} })).result;
+await call(`mail-jobs/${mail.id}/claim`, { method: 'POST', owner: true, data: {}, expected: 409 });
+await call(`mail-jobs/${mail.id}/complete`, { method: 'POST', key: true, data: { lease_token: 'wrong' }, expected: 409 });
+await call(`mail-jobs/${mail.id}/complete`, { method: 'POST', key: true, data: { lease_token: claim.lease_token }, expected: 400 });
+const mailInput = { ...input, company: input.company + ' mail', source_upload_ids: mailDetail.job.source_upload_ids, mail_job_id: mail.id, mail_lease_token: claim.lease_token };
+await call('shortlists', { method: 'POST', key: true, data: { ...mailInput, mail_lease_token: 'wrong' }, expected: 409 });
+await call('shortlists', { method: 'POST', key: true, data: { ...mailInput, source_upload_ids: [] }, expected: 400 });
+const mailDraft = (await call('shortlists', { method: 'POST', key: true, data: mailInput, expected: 201 })).result;
+await call(`shortlists/${mailDraft.shortlist_id}/versions`, { method: 'POST', key: true, data: { ...mailInput, expected_latest_version_id: mailDraft.version_id }, expected: 409 });
+await call(`shortlists/${mailDraft.shortlist_id}/publish`, { method: 'POST', key: true, data: { version_id: mailDraft.version_id, expected_current_version_id: null }, expected: 409 });
+await call(`shortlists/${mailDraft.shortlist_id}/publish`, { method: 'POST', key: true, data: { version_id: mailDraft.version_id, expected_current_version_id: null, mail_lease_token: claim.lease_token } });
+// Simulate an interrupted agent after publication. A later run resumes the same result.
+const expired = spawnSync(process.execPath, [cli, 'd1','execute','DB','--local','--persist-to',state,'--command',`UPDATE mail_jobs SET lease_until = '2000-01-01T00:00:00.000Z' WHERE id = '${mail.id}'`], { encoding: 'utf8' });
+assert.equal(expired.status, 0, 'Synthetic lease expiry failed');
+assert.equal((await call('mail-jobs', { key: true })).result.jobs.some(job => job.id === mail.id), true);
+const reclaimed = (await call(`mail-jobs/${mail.id}/claim`, { method: 'POST', key: true, data: {} })).result;
+const resumed = (await call('mail-jobs/' + mail.id, { key: true })).result;
+assert.equal(resumed.versions.length,1); assert.equal(resumed.versions[0].published_version_id,mailDraft.version_id);
+await call(`mail-jobs/${mail.id}/complete`, { method: 'POST', key: true, data: { lease_token: claim.lease_token }, expected: 409 });
+await call(`mail-jobs/${mail.id}/complete`, { method: 'POST', key: true, data: { lease_token: reclaimed.lease_token, note: 'Verified synthetic public result.' } });
+await call(`mail-jobs/${mail.id}/claim`, { method: 'POST', key: true, data: {}, expected: 409 });
+assert.equal((await call('mail-jobs?status=done', { key: true })).result.jobs[0].result_version_ids[0],mailDraft.version_id);
+await call(`mail-jobs/${duplicateMail.id}/retry`, { method: 'POST', key: true, data: {}, expected: 403 });
+await call(`mail-jobs/${duplicateMail.id}/retry`, { method: 'POST', owner: true, data: {} });
+const reviewClaim = (await call(`mail-jobs/${duplicateMail.id}/claim`, { method: 'POST', key: true, data: {} })).result;
+await call(`mail-jobs/${duplicateMail.id}/review`, { method: 'POST', key: true, data: { lease_token: reviewClaim.lease_token, note: 'Ambiguous source; owner review needed.' } });
+assert.equal((await call('mail-jobs?status=needs_review', { owner: true })).result.jobs.length,1);
 await call('keys/' + key.id, { method: 'DELETE', owner: true });
 await call('master', { key: true, expected: 401 });
-console.log(JSON.stringify({ passed: true, http_checks: count, all_records_synthetic: true, checked: ['private master', 'anonymous write denial', 'uploader scopes', 'private source files', 'six columns', 'draft privacy', 'publication', 'CSV', 'version conflicts', 'restore', 'owner-only deletion', 'deleted export denial', 'stale deletion rejection', 'deleted shortlist recovery', 'private draft recovery', 'key revocation', 'CSRF'] }, null, 2));
+console.log(JSON.stringify({ passed: true, http_checks: count, all_records_synthetic: true, checked: ['private master', 'anonymous write denial', 'uploader scopes', 'private source files', 'six columns', 'draft privacy', 'publication', 'CSV', 'version conflicts', 'restore', 'owner-only deletion', 'deleted export denial', 'stale deletion rejection', 'deleted shortlist recovery', 'private draft recovery', 'private mail ingestion', 'mail attachment storage', 'duplicate message detection', 'unapproved links', 'exclusive job claims', 'lease expiry and crash recovery', 'mail result publication', 'review and owner retry', 'key revocation', 'CSRF'] }, null, 2));
 
 } finally {
   server.kill('SIGTERM');

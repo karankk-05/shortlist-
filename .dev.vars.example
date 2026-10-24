@@ -1,3 +1,6 @@
 # Generate a LOCAL owner key with npm run setup:owner -- --local
 # This file is documentation only. The helper writes .dev.vars (gitignored).
 ADMIN_KEY_SHA256=
+# Optional, configured privately with npm run setup:mail -- --local
+MAIL_USERNAME=
+MAIL_PASSWORD=

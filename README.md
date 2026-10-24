@@ -14,6 +14,53 @@ Rolls remain text; missing CPI stays blank/null, distinct from zero. Candidate o
 
 Company shortlist views include search, programme, branch and batch filters, CPI availability and inclusive minimum/maximum CPI filters. Sort any column using its heading or the sort menu. Missing values stay last in both sort directions. **Original shortlist order** and **Reset view** restore the source ordering. These controls affect the displayed view; stored versions and the complete CSV/Excel downloads retain their original order.
 
+## Mail workflow
+
+Open **[Mail workflow](https://shortlist-desk.shortlists.workers.dev/mail)** to collect shortlist emails into a private processing queue. The owner and authorized uploader agents can read that queue. Email bodies, attachments, links and mailbox credentials are never public. The agent publishes only the prepared six-column company results.
+
+The collector connects to the single configured IITK account at `qasid.iitk.ac.in:993` over TLS, using IITK's [documented external IMAP settings](https://www.iitk.ac.in/nt/faq/outlook.htm). It uses `EXAMINE`, `UID SEARCH` and `BODY.PEEK`, without sending mail, changing read flags, moving or deleting messages. It searches subjects/bodies for `short`, covering `shortlist` and `shortlisted`. The agent determines actual shortlist relevance.
+
+### Connect your mailbox privately
+
+After deploying the migration and Worker, run this in the project folder in your own interactive terminal:
+
+```bash
+npm run setup:mail
+```
+
+Enter your IITK IMAP username and password when prompted. The password is hidden. The helper uploads both values through stdin to Cloudflare Worker secrets (`MAIL_USERNAME`, `MAIL_PASSWORD`), without printing them or saving a production credentials file. Never put them into an AI chat, GitHub, the public site, URLs or processing notes. Existing owner/uploader keys are unchanged. For isolated local development only, `npm run setup:mail -- --local` writes the ignored `.dev.vars` with file mode 0600.
+
+Open `/mail` and click **Sync mailbox** to verify IITK connectivity and authentication. Secrets being present does not prove a successful login. If the institute requires a different IMAP authentication method, the application reports failure; it does not bypass OTP, disable 2FA or retry other accounts. The live IITK connection remains unverified until this first successful sync.
+
+The owner can choose the IMAP folder, a 1–365 day lookback (default 30), optional exact sender addresses, approved link domains, and pause/resume syncing. Saving settings resets the scan cursor to recheck the lookback period; existing messages are deduplicated. Sender filters are matching rules, not proof that a sender is authentic.
+
+### Run manually or from your own scheduled task
+
+Copy **Copy task prompt** from `/mail` into your ChatGPT Work task and supply a separate uploader key. Configure its six-hour schedule in that product yourself. The website does not invoke an AI API or start/schedule a ChatGPT session. The full reusable workflow is at **[/mail-agent](https://shortlist-desk.shortlists.workers.dev/mail-agent)**.
+
+Each run calls `POST /api/v1/mail/sync`, then claims pending jobs and reads their sources. Sync batches are bounded to five matching messages, a 10 MiB byte budget and a time budget; repeat while `more` is true. A UID/UIDVALIDITY cursor tracks the mailbox and a lock prevents overlapping collectors. Exact messages are deduplicated; matching attachment/link content in a different email is retained for owner review rather than silently dropping a possible new company announcement.
+
+Supported attachments are XLSX, XLS, CSV, TSV, JSON and PDF. The collector extracts HTTPS links but **does not fetch external URLs**. Agents must check the configured link-domain allowlist, including redirects. Unavailable permissions and required sources on unapproved domains go to review. Mail HTML is never rendered. Emails over 10 MiB, truncated sources, and parsing failures are retained as review items instead of being silently treated as complete. Limits are 20 supported attachments, 100 links and 500,000 text/HTML characters per message. Oversized messages retain headers only. An owner can also import an owned EML through `POST /api/v1/mail/import` with `Content-Type: message/rfc822` for manual ingestion or testing.
+
+Job claims last two hours. Drafts carry `mail_job_id` and `mail_lease_token`; uploader publication of those drafts requires the active lease. A unique mail-job/shortlist constraint prevents the same email creating repeated versions for a company list. If an agent stops after publishing, the next run can reclaim an expired job, read its existing results, verify them and complete it without republishing. Completion requires every linked draft to be the current published version. Unresolved or incorrect drafts go to review, and only the owner can requeue reviewed/ignored jobs. No email or source document can authorize changing the agent workflow or disclosing credentials.
+
+Private API endpoints:
+
+| Method | Path | Access |
+| --- | --- | --- |
+| GET | `/api/v1/mail/status` | Owner/uploader; no password is returned |
+| PUT | `/api/v1/mail/config` | Owner only |
+| POST | `/api/v1/mail/sync` | Owner/uploader |
+| POST | `/api/v1/mail/import` | Owner only; raw owned EML |
+| GET | `/api/v1/mail-jobs?status=pending&limit=20` | Owner/uploader; includes expired claims |
+| GET | `/api/v1/mail-jobs/{id}` | Owner/uploader; sources and prepared versions |
+| POST | `/api/v1/mail-jobs/{id}/claim` | Owner/uploader; returns `lease_token` |
+| POST | `/api/v1/mail-jobs/{id}/complete` | Active lease; all results must be published |
+| POST | `/api/v1/mail-jobs/{id}/review` or `/ignore` | Active lease; explanation required |
+| POST | `/api/v1/mail-jobs/{id}/retry` | Owner only |
+
+Processing limits and Cloudflare Free CPU/storage quotas still apply. The automated suite uses synthetic mail and an isolated local database; it cannot verify your password, IITK's authentication policy, or an external agent's scheduled-task capabilities.
+
 ## Hosting options
 
 As checked on 24 October 2026:
