@@ -1,5 +1,14 @@
 export const COLUMNS = ['name', 'roll', 'programme', 'branch', 'cpi', 'email'] as const;
 export type StudentRow = { name: string; roll: string; programme: string; branch: string; cpi: number | null; email: string };
+/** Input order alone must not turn the same six-column result into another mail version. */
+export function sameShortlistRows(first: StudentRow[], second: StudentRow[]) {
+  if (first.length !== second.length) return false;
+  const byRoll = new Map(first.map(row => [row.roll, row]));
+  return second.every(row => {
+    const previous = byRoll.get(row.roll);
+    return previous && COLUMNS.every(column => previous[column] === row[column]);
+  });
+}
 export type RowWarning = { row: number; roll: string; issues: string[] };
 export class InputError extends Error {
   status: number;

@@ -31,6 +31,7 @@ function entities(value: string) {
 export function extractMailLinks(text: string, html: string, domains: string[]) {
   const raw = [...text.matchAll(/https?:\/\/[^\s<>"']+/gi)].map(match => match[0]);
   for (const match of html.matchAll(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi)) raw.push(entities(match[1] || match[2] || match[3]));
+  for (const match of html.matchAll(/<img\b[^>]*\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi)) raw.push(entities(match[1] || match[2] || match[3]));
   const seen = new Set<string>(), links: { url: string; allowed: boolean }[] = [];
   for (const value of raw.slice(0, 1000)) {
     try {
@@ -49,10 +50,12 @@ export async function parseMail(bytes: Uint8Array, config: MailConfig, headersOn
   const html = (email.html || '').slice(0, 500000);
   const fallback = entities(html.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ').replace(/<[^>]*>/g, ' '));
   const text = (email.text || fallback).slice(0, 500000);
-  const supported = (headersOnly ? [] : email.attachments || []).filter(item => /\.(xlsx?|csv|tsv|json|pdf)$/i.test(item.filename || ''));
-  const attachments = supported.slice(0, 20).map(item => ({
-    filename: (item.filename || 'attachment').replace(/[\r\n\0\\/]/g, '_').slice(0, 240),
+  const imageExtensions: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };
+  const supported = (headersOnly ? [] : email.attachments || []).filter(item => /\.(xlsx?|csv|tsv|json|pdf|txt|png|jpe?g|webp|gif)$/i.test(item.filename || '') || Object.hasOwn(imageExtensions, item.mimeType));
+  const attachments = supported.slice(0, 20).map((item, index) => ({
+    filename: (item.filename || `inline-image-${index + 1}.${imageExtensions[item.mimeType] || 'bin'}`).replace(/[\r\n\0\\/]/g, '_').slice(0, 240),
     content_type: item.mimeType || 'application/octet-stream', bytes: new Uint8Array(item.content as ArrayBuffer),
+    inline: item.disposition === 'inline' || !!item.related, content_id: (item.contentId || '').slice(0, 998),
   }));
   const links = extractMailLinks(text, html, config.link_domains);
   const truncated = supported.length > 20 || (email.text || '').length > 500000 || (email.html || '').length > 500000 || links.length >= 100;

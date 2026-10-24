@@ -19,7 +19,44 @@ export async function mailStatus(db: D1Database, env: Cloudflare.Env, admin: boo
   const counts = await db.prepare('SELECT status, count(*) AS count FROM mail_jobs GROUP BY status').all();
   return { configured: !!(env.MAIL_USERNAME && env.MAIL_PASSWORD), ...(admin ? { username: env.MAIL_USERNAME || null } : {}), config, state, counts: counts.results, host: IMAP_HOST, port: IMAP_PORT, read_only: true };
 }
-export async function saveMail(db: D1Database, raw: Uint8Array, context: { account: string; validity: string; uid: number; config: MailConfig; oversized?: boolean }) {
+type StoredFile = { id: string; filename: string; size: number; content_type: string; inline?: boolean; content_id?: string };
+type ExistingMail = { id: string; object_key: string; status: string; note: string; updated_at: string; result_version_ids: string };
+type MailSaveResult = { queued?: boolean; duplicate?: boolean; filtered?: boolean; updated?: boolean; added_attachments?: number; id?: string; status?: string };
+/** Recover newly supported image/TXT sources without duplicating a job or changing in-flight results. */
+async function refreshMailFiles(db: D1Database, existing: ExistingMail, parsed: Awaited<ReturnType<typeof parseMail>>): Promise<MailSaveResult> {
+  if (!['pending', 'needs_review'].includes(existing.status) || existing.result_version_ids !== '[]' || existing.status === 'needs_review' && !existing.note.startsWith('Matching source content was seen before.')) return { duplicate: true };
+  if (await db.prepare('SELECT id FROM versions WHERE source_mail_job_id = ? LIMIT 1').bind(existing.id).first()) return { duplicate: true };
+  const store = objectStore(db), object = await store.get(existing.object_key);
+  if (!object) return { duplicate: true };
+  const previous = await object.json<{ attachments: StoredFile[]; links: { url: string; allowed: boolean }[] }>();
+  const pool = previous.attachments.slice(), files: StoredFile[] = [], added: { file: StoredFile; key: string }[] = [], keys: string[] = [];
+  const sourceKey = `mail/${existing.id}-${crypto.randomUUID()}.json`;
+  try {
+    for (const attachment of parsed.attachments) {
+      if (!attachment.bytes.length) continue;
+      const index = pool.findIndex(file => file.filename === attachment.filename && file.size === attachment.bytes.length && file.content_type === attachment.content_type);
+      if (index >= 0) { files.push({ ...pool.splice(index, 1)[0], inline: attachment.inline, content_id: attachment.content_id }); continue; }
+      const file = { id: crypto.randomUUID(), filename: attachment.filename, size: attachment.bytes.length, content_type: attachment.content_type, inline: attachment.inline, content_id: attachment.content_id };
+      const key = `inputs/${file.id}`; await store.put(key, attachment.bytes.slice().buffer); keys.push(key); added.push({ file, key }); files.push(file);
+    }
+    files.push(...pool);
+    if (!added.length && JSON.stringify(previous.links) === JSON.stringify(parsed.links)) return { duplicate: true };
+    const hashes = await Promise.all(parsed.attachments.map(file => mailHash(file.bytes)));
+    const contentHash = await mailHash(JSON.stringify({ files: hashes.sort(), links: parsed.links.map(link => link.url).sort() }));
+    const duplicate = await db.prepare('SELECT id FROM mail_jobs WHERE content_hash = ? AND id != ? ORDER BY created_at LIMIT 1').bind(contentHash, existing.id).first<{ id: string }>();
+    const note = duplicate ? 'Matching source content was seen before. Check whether this is a repeated announcement or a separate shortlist.' : existing.note.startsWith('Matching source content was seen before.') || added.length && existing.note.startsWith('No supported attachment') ? '' : existing.note;
+    const status = duplicate ? 'needs_review' : existing.status === 'needs_review' ? 'pending' : existing.status;
+    await store.put(sourceKey, JSON.stringify({ text: parsed.text, links: parsed.links, attachments: files })); keys.push(sourceKey);
+    const statements = [db.prepare("UPDATE mail_jobs SET object_key = ?, source_upload_ids = ?, content_hash = ?, duplicate_of = ?, status = ?, note = ?, updated_at = ? WHERE id = ? AND updated_at = ? AND status IN ('pending','needs_review') AND result_version_ids = '[]' AND NOT EXISTS (SELECT 1 FROM versions WHERE source_mail_job_id = ?)")
+      .bind(sourceKey, JSON.stringify(files.map(file => file.id)), contentHash, duplicate?.id || null, status, note, new Date().toISOString(), existing.id, existing.updated_at, existing.id)];
+    for (const { file, key } of added) statements.push(db.prepare("INSERT INTO uploads (id, filename, object_key, size, content_type, created_at, created_by) SELECT ?, ?, ?, ?, ?, ?, 'mail-collector' WHERE EXISTS (SELECT 1 FROM mail_jobs WHERE id = ? AND object_key = ?)")
+      .bind(file.id, file.filename, key, file.size, file.content_type, new Date().toISOString(), existing.id, sourceKey));
+    const [changed] = await db.batch(statements);
+    if (changed.meta.changes !== 1) { for (const key of keys) await store.delete(key); return { duplicate: true }; }
+    return { duplicate: true, updated: true, added_attachments: added.length, id: existing.id };
+  } catch (error) { for (const key of keys) await store.delete(key); throw error; }
+}
+export async function saveMail(db: D1Database, raw: Uint8Array, context: { account: string; validity: string; uid: number; config: MailConfig; oversized?: boolean }): Promise<MailSaveResult> {
   let parsed: Awaited<ReturnType<typeof parseMail>>;
   try { parsed = await parseMail(raw, context.config, context.oversized); }
   catch { parsed = { message_id: '', subject: `Unreadable matching email (UID ${context.uid})`, sender: '', received_at: null, text: 'The MIME message could not be parsed. Inspect the original mailbox before processing this item.', links: [], attachments: [], truncated: true }; }
@@ -29,7 +66,8 @@ export async function saveMail(db: D1Database, raw: Uint8Array, context: { accou
   if (!context.oversized && !parsed.truncated && !hasShortlistKeyword(parsed.subject, parsed.text)) return { filtered: true };
   const rawHash = await mailHash(raw);
   const messageKey = await mailHash(context.account + '\n' + (parsed.message_id || context.validity + ':' + context.uid) + '\n' + rawHash);
-  if (await db.prepare('SELECT id FROM mail_jobs WHERE message_key = ?').bind(messageKey).first()) return { duplicate: true };
+  const existing = await db.prepare('SELECT id, object_key, status, note, updated_at, result_version_ids FROM mail_jobs WHERE message_key = ?').bind(messageKey).first<ExistingMail>();
+  if (existing) return context.oversized || parsed.truncated ? { duplicate: true } : refreshMailFiles(db, existing, parsed);
   const attachmentHashes = await Promise.all(parsed.attachments.map(file => mailHash(file.bytes)));
   const contentHash = await mailHash(JSON.stringify({ files: attachmentHashes.slice().sort(), links: parsed.links.map(link => link.url).sort() }));
   const comparable = parsed.attachments.length || parsed.links.length;
@@ -42,7 +80,7 @@ export async function saveMail(db: D1Database, raw: Uint8Array, context: { accou
       if (!file.bytes.length) continue;
       const uploadId = crypto.randomUUID(), fileKey = `inputs/${uploadId}`;
       await store.put(fileKey, file.bytes.slice().buffer); keys.push(fileKey); sourceIds.push(uploadId);
-      files.push({ id: uploadId, filename: file.filename, size: file.bytes.length, content_type: file.content_type });
+      files.push({ id: uploadId, filename: file.filename, size: file.bytes.length, content_type: file.content_type, inline: file.inline, content_id: file.content_id });
     }
     const note = context.oversized ? 'Email exceeds 10 MiB. Only headers were saved; review the original mailbox.' : parsed.truncated ? 'Source exceeds the text, link or attachment count limit. The saved source is incomplete; review the original mailbox.' : duplicate ? 'Matching source content was seen before. Check whether this is a repeated announcement or a separate shortlist.' : !comparable ? 'No supported attachment or HTTPS link was found. Inspect the email text for candidate records.' : '';
     const status = context.oversized || parsed.truncated || duplicate ? 'needs_review' : 'pending';
@@ -71,7 +109,7 @@ export async function syncMail(db: D1Database, env: Cloudflare.Env) {
     let cursor = state?.uid_validity === mailbox.validity ? state.last_uid : 0;
     const since = new Date(Date.now() - config.lookback_days * 86400000);
     const candidates = await client.search(cursor + 1, mailbox.lastUid, since);
-    let processed = 0, queued = 0, duplicates = 0, filtered = 0, bytes = 0;
+    let processed = 0, queued = 0, duplicates = 0, filtered = 0, updated = 0, bytes = 0;
     const started = Date.now();
     for (const uid of candidates) {
       if (processed >= 5 || bytes >= 10 * 1024 * 1024 || Date.now() - started > 25000) break;
@@ -87,6 +125,7 @@ export async function syncMail(db: D1Database, env: Cloudflare.Env) {
             bytes += raw.length;
             const result = await saveMail(db, raw, { account, validity: mailbox.validity, uid, config, oversized });
             if (result.queued) queued++; if (result.duplicate) duplicates++; if (result.filtered) filtered++;
+            if ('updated' in result && result.updated) updated++;
           }
         }
       }
@@ -96,7 +135,7 @@ export async function syncMail(db: D1Database, env: Cloudflare.Env) {
     const more = processed < candidates.length;
     if (!more) cursor = Math.max(cursor, mailbox.lastUid);
     await db.prepare('UPDATE mail_state SET uid_validity = ?, last_uid = ?, last_success_at = ?, last_error = NULL WHERE account_id = ? AND lock_token = ?').bind(mailbox.validity, cursor, new Date().toISOString(), account, token).run();
-    return { processed, queued, duplicates, filtered, more, read_only: true };
+    return { processed, queued, duplicates, filtered, updated, more, read_only: true };
   } catch (error) {
     const code = error instanceof MailError ? error.code : 'sync_failed';
     await db.prepare('UPDATE mail_state SET last_error = ? WHERE account_id = ? AND lock_token = ?').bind(code, account, token).run();

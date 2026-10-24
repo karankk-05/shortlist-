@@ -59,7 +59,7 @@ test('MIME decodes base64 attachments, encoded subjects and HTML links without e
   assert.equal(result.text.includes('neverExecute'),false);
 });
 test('shortlist keywords accept spaced/hyphenated forms and reject generic short or embedded substrings', () => {
-  for (const phrase of ['shortlist', 'SHORTLISTED', 'shortlists', 'shortlisting', 'short list', 'short listed', 'short-listed', 'short-listing', 'short\nlist', 'short\u00a0list', 'short\u2011listed']) {
+  for (const phrase of ['shortlist', 'SHORTLISTED', 'shortlists', 'shortlisting', 'short list', 'short lists', 'short listed', 'short-listed', 'short-lists', 'short-listing', 'short\nlist', 'short\u00a0list', 'short\u2011listed']) {
     assert.equal(hasShortlistKeyword(`Company [${phrase}]`, ''), true, phrase);
     assert.equal(hasShortlistKeyword('Interview update', `Please see the ${phrase} attached.`), true, phrase);
   }
@@ -67,6 +67,19 @@ test('shortlist keywords accept spaced/hyphenated forms and reject generic short
     assert.equal(hasShortlistKeyword(text, text), false, text);
   }
   assert.equal(hasShortlistKeyword('A short', 'list of courses'), false, 'Do not join words across subject/body');
+});
+test('MIME retains TXT candidate lists and unnamed inline images as private source files', async () => {
+  const raw = 'From: SPO <spo@example.invalid>\r\nSubject: Company shortlists\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="files"\r\n\r\n--files\r\nContent-Type: text/html\r\n\r\n<p>Shortlisted students:</p><img src="cid:candidates"><img src="https://spo.iitk.ac.in/candidates.png">\r\n--files\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename="candidates.txt"\r\n\r\nSynthetic 230001\r\n--files\r\nContent-Type: image/png\r\nContent-Disposition: inline\r\nContent-ID: <candidates>\r\nContent-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n--files--\r\n';
+  const parsed = await parseMail(enc.encode(raw), DEFAULT_MAIL_CONFIG);
+  assert.equal(parsed.attachments.length, 2);
+  assert.equal(parsed.attachments[0].filename, 'candidates.txt');
+  assert.match(dec.decode(parsed.attachments[0].bytes), /Synthetic 230001/);
+  assert.match(parsed.attachments[1].filename, /\.png$/);
+  assert.equal(parsed.attachments[1].inline, true);
+  assert.equal(parsed.attachments[1].content_id, '<candidates>');
+  assert.equal(parsed.attachments[1].bytes.length, 8);
+  assert.equal(parsed.links[0].url, 'https://spo.iitk.ac.in/candidates.png');
+  assert.equal(parsed.links[0].allowed, true);
 });
 test('link allowlist rejects lookalike hosts, credential URLs and insecure protocols', () => {
   const links = extractMailLinks('https://spo.iitk.ac.in/sheet https://iitk.ac.in.evil.example/sheet http://iitk.ac.in/old https://user:secret@iitk.ac.in/file', '', ['iitk.ac.in']);

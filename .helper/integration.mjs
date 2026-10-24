@@ -187,6 +187,51 @@ const decodedMatch = (await call('mail/import', { method: 'POST', owner: true, r
 assert.equal(decodedMatch.queued, true, 'Check MIME-decoded body text');
 const hiddenMatch = (await call('mail/import', { method: 'POST', owner: true, raw: 'From: Academic <academic@example.invalid>\r\nSubject: Course update\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>Class begins shortly.</p><a href="https://docs.google.com/shortlist">Course portal</a><script>shortlist</script>\r\n', expected: 201 })).result;
 assert.equal(hiddenMatch.filtered, true, 'Raw HTML URLs and scripts alone must not qualify an email');
+// Separate emails for the same event reuse a verified result without another draft or publication.
+const resend = (await call('mail/import', { method: 'POST', owner: true, raw: 'From: RAS <ras@example.invalid>\r\nSubject: Synthetic company shortlists\r\nDate: Fri, 23 Oct 2026 12:00:00 +0530\r\n\r\nShortlisted candidates: 0230001, 230002.\r\n', expected: 201 })).result;
+const resendClaim = (await call(`mail-jobs/${resend.id}/claim`, { method: 'POST', key: true, data: {} })).result;
+const reuse = { lease_token: resendClaim.lease_token, shortlist_id: mailDraft.shortlist_id, version_id: mailDraft.version_id, note: 'Verified same company, role, interview round, event date/time and candidate rolls in the RAS resend.' };
+await call(`mail-jobs/${resend.id}/reuse`, { method: 'POST', data: reuse, expected: 401 });
+await call(`mail-jobs/${resend.id}/reuse`, { method: 'POST', key: true, data: { ...reuse, lease_token: 'wrong' }, expected: 409 });
+await call(`mail-jobs/${resend.id}/reuse`, { method: 'POST', key: true, data: { ...reuse, note: '' }, expected: 400 });
+const sameResult = (await call(`shortlists/${mailDraft.shortlist_id}/versions`, { method: 'POST', key: true, data: { ...mailInput, rows: rows.slice().reverse(), mail_job_id: resend.id, mail_lease_token: resendClaim.lease_token, source_upload_ids: [], expected_latest_version_id: mailDraft.version_id }, expected: 409 })).result;
+assert.equal(sameResult.duplicate, true); assert.equal(sameResult.version_id, mailDraft.version_id);
+assert.equal((await call(`mail-jobs/${resend.id}/reuse`, { method: 'POST', key: true, data: reuse })).result.reused, true);
+await call(`mail-jobs/${resend.id}/reuse`, { method: 'POST', key: true, data: reuse });
+assert.equal((await call(`mail-jobs/${resend.id}`, { key: true })).result.versions.length, 1);
+await call(`mail-jobs/${resend.id}/ignore`, { method: 'POST', key: true, data: { lease_token: resendClaim.lease_token, note: 'Cannot ignore a linked result.' }, expected: 400 });
+await call(`mail-jobs/${resend.id}/complete`, { method: 'POST', key: true, data: { lease_token: resendClaim.lease_token } });
+const reusedJob = (await call(`mail-jobs/${resend.id}`, { key: true })).result;
+assert.equal(reusedJob.job.status, 'done'); assert.deepEqual(reusedJob.job.result_version_ids, [mailDraft.version_id]);
+assert.equal((await call(`shortlists/${mailDraft.shortlist_id}/versions`, { key: true })).result.versions.length, 1, 'Duplicate mail must not add a version');
+// Only a current publication can be reused; a new event/time gets its own identity.
+const newerMail = (await call('mail/import', { method: 'POST', owner: true, raw: 'From: SPO <spo@example.invalid>\r\nSubject: New event short lists\r\nDate: Sat, 24 Oct 2026 12:00:00 +0530\r\n\r\nShort listed students: 0230001, 230002.\r\n', expected: 201 })).result;
+const newerClaim = (await call(`mail-jobs/${newerMail.id}/claim`, { method: 'POST', key: true, data: {} })).result;
+const newEvent = (await call('shortlists', { method: 'POST', key: true, data: { ...input, company: input.company + ' mail', round: 'Interview 2026-10-27 10:00 IST', mail_job_id: newerMail.id, mail_lease_token: newerClaim.lease_token, source_upload_ids: [] }, expected: 201 })).result;
+await call(`mail-jobs/${newerMail.id}/reuse`, { method: 'POST', key: true, data: { ...reuse, lease_token: newerClaim.lease_token, shortlist_id: newEvent.shortlist_id, version_id: newEvent.version_id }, expected: 409 });
+const sortedQueue = (await call('mail-jobs?status=all&limit=50', { owner: true })).result.jobs;
+for (let index = 1; index < sortedQueue.length; index++) assert.ok((sortedQueue[index - 1].received_at || sortedQueue[index - 1].created_at) >= (sortedQueue[index].received_at || sortedQueue[index].created_at), 'Queue must be newest received first');
+assert.ok(sortedQueue.findIndex(job => job.id === newerMail.id) < sortedQueue.findIndex(job => job.id === resend.id), 'Date order must not follow import order');
+// TXT and image mail attachments remain private and preserve their bytes.
+const mediaEml = 'From: SPO <spo@example.invalid>\r\nSubject: Image and TXT shortlists\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="media"\r\n\r\n--media\r\nContent-Type: text/plain\r\n\r\nShortlisted students are attached.\r\n--media\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename="candidates.txt"\r\n\r\nSynthetic 230002\r\n--media\r\nContent-Type: image/png\r\nContent-Disposition: inline; filename="candidates.png"\r\nContent-ID: <candidates>\r\nContent-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n--media--\r\n';
+const mediaJob = (await call('mail/import', { method: 'POST', owner: true, raw: mediaEml, expected: 201 })).result;
+const mediaSource = (await call('mail-jobs/' + mediaJob.id, { key: true })).result.source;
+assert.equal(mediaSource.attachments.length, 2); assert.equal(mediaSource.attachments[1].inline, true);
+await call('uploads/' + mediaSource.attachments[0].id, { expected: 401 });
+assert.match((await call('uploads/' + mediaSource.attachments[0].id, { key: true })).result, /Synthetic 230002/);
+const imageDownload = await fetch(origin + '/api/v1/uploads/' + mediaSource.attachments[1].id, { headers: { Authorization: 'Bearer ' + uploaderKey } });
+assert.equal(imageDownload.status, 200); assert.deepEqual(new Uint8Array(await imageDownload.arrayBuffer()), new Uint8Array(Buffer.from('iVBORw0KGgo=', 'base64'))); count++;
+// Simulate a message collected before image/TXT support: a rescan upgrades that same job.
+const legacySource = JSON.stringify({ ...mediaSource, attachments: [] });
+const legacyBytes = Buffer.from(legacySource);
+const legacySql = `UPDATE object_chunks SET bytes = X'${legacyBytes.toString('hex')}' WHERE object_key = (SELECT object_key FROM mail_jobs WHERE id = '${mediaJob.id}'); UPDATE objects SET size = ${legacyBytes.length}, chunks = 1 WHERE key = (SELECT object_key FROM mail_jobs WHERE id = '${mediaJob.id}'); UPDATE mail_jobs SET source_upload_ids = '[]' WHERE id = '${mediaJob.id}';`;
+const legacySeed = spawnSync(process.execPath, [cli, 'd1','execute','DB','--local','--persist-to',state,'--command',legacySql], { encoding: 'utf8' });
+assert.equal(legacySeed.status, 0, 'Synthetic legacy source setup failed');
+const upgraded = (await call('mail/import', { method: 'POST', owner: true, raw: mediaEml, expected: 201 })).result;
+assert.equal(upgraded.updated, true); assert.equal(upgraded.added_attachments, 2); assert.equal(upgraded.id, mediaJob.id);
+const upgradedDetail = (await call('mail-jobs/' + mediaJob.id, { key: true })).result;
+assert.equal(upgradedDetail.source.attachments.length, 2); assert.equal(upgradedDetail.job.source_upload_ids.length, 2);
+assert.equal((await call('mail/import', { method: 'POST', owner: true, raw: mediaEml, expected: 201 })).result.updated, undefined, 'A second rescan must not upload those files again');
 await call('keys/' + key.id, { method: 'DELETE', owner: true });
 await call('master', { key: true, expected: 401 });
 console.log(JSON.stringify({ passed: true, http_checks: count, all_records_synthetic: true, checked: ['private master', 'anonymous write denial', 'uploader scopes', 'private source files', 'six columns', 'draft privacy', 'publication', 'CSV', 'version conflicts', 'restore', 'owner-only deletion', 'deleted export denial', 'stale deletion rejection', 'deleted shortlist recovery', 'private draft recovery', 'private mail ingestion', 'mail attachment storage', 'duplicate message detection', 'unapproved links', 'exclusive job claims', 'lease expiry and crash recovery', 'mail result publication', 'review and owner retry', 'key revocation', 'CSRF'] }, null, 2));

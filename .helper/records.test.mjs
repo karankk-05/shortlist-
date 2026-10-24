@@ -1,10 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { validateRows, csvRows, toCSV } from '../lib/records.ts';
+import { validateRows, csvRows, sameShortlistRows, toCSV } from '../lib/records.ts';
 const student = { name: 'Synthetic Student', roll: '0230001', programme: 'BTech', branch: 'Synthetic department', cpi: null, email: 'qa@example.invalid' };
 test('preserves text identities, source order, blank and zero CPI', () => {
   const result = validateRows([student, { ...student, roll: '230002', cpi: 0 }]);
   assert.equal(result.rows[0].roll, '0230001'); assert.equal(result.rows[0].cpi, null); assert.equal(result.rows[1].cpi, 0);
+});
+test('duplicate results ignore row order but preserve candidate identities, fields and missing CPI', () => {
+  const second = { ...student, roll: '230002', cpi: 0 };
+  assert.equal(sameShortlistRows([student, second], [second, { ...student }]), true);
+  assert.equal(sameShortlistRows([student], [second]), false);
+  assert.equal(sameShortlistRows([student], [{ ...student, cpi: 0 }]), false);
+  assert.equal(sameShortlistRows([student], [{ ...student, email: 'changed@example.invalid' }]), false);
+  assert.equal(sameShortlistRows([student], [student, second]), false);
 });
 test('does not infer missing values and reports observed missing fields', () => {
   const result = validateRows([{ ...student, name: '', branch: '' }]);

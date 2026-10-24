@@ -4,7 +4,7 @@ import { agentGuide } from './agent-guide';
 import { mailGuide } from './mail-guide';
 import { mailConfig, mailHash, mailLease, mailStatus, saveMail, syncMail } from './mail-service';
 import { validateMailConfig } from './mail-content';
-import { COLUMNS, csvRows, InputError, StudentRow, toCSV, validateRows } from './records';
+import { COLUMNS, csvRows, InputError, sameShortlistRows, StudentRow, toCSV, validateRows } from './records';
 
 type Actor = { role: 'admin' | 'uploader'; id: string; label: string };
 type List = { id: string; company: string; role: string; round: string; season: string; notes: string; published_version_id: string | null; created_at: string; updated_at: string };
@@ -85,6 +85,10 @@ async function findVersion(versionId: string, listId: string) {
 async function versionRows(version: Version) {
   const object = await bucket().get(version.object_key); if (!object) throw new InputError('The shortlist file is temporarily unavailable.', 503); return object.json<StudentRow[]>();
 }
+async function mailVersions(jobId: string) {
+  return db().prepare('SELECT v.id, v.shortlist_id, v.number, v.row_count, v.published_at, s.company, s.role, s.round, s.season, s.published_version_id, s.deleted_at FROM versions v JOIN shortlists s ON s.id = v.shortlist_id WHERE v.source_mail_job_id = ? OR v.id IN (SELECT value FROM json_each((SELECT result_version_ids FROM mail_jobs WHERE id = ?))) ORDER BY v.created_at')
+    .bind(jobId, jobId).all<{ id: string; shortlist_id: string; published_at: string | null; published_version_id: string | null; deleted_at: string | null }>();
+}
 const publicVersion = (version: Version) => ({ id: version.id, number: version.number, row_count: version.row_count, created_at: version.created_at, published_at: version.published_at });
 async function log(action: string, actorId: string, target: string) {
   await db().prepare('INSERT INTO audit (id, action, actor, target_id, created_at) VALUES (?, ?, ?, ?, ?)').bind(id(), action, actorId, target, now()).run();
@@ -121,16 +125,24 @@ async function createDraft(request: Request, listId?: string) {
     if ((JSON.parse(job.source_upload_ids) as string[]).some(value => !sourceIds.includes(value))) throw new InputError('Link every attachment from this mail job in source_upload_ids, including any you explain as irrelevant in processing_notes.');
   }
   for (const sourceId of sourceIds) if (!(await db().prepare('SELECT id FROM uploads WHERE id = ?').bind(sourceId).first())) throw new InputError('A source upload does not exist.');
-  let list: List; let number = 1;
+  let list: List; let number = 1; let latestVersionId: string | null = null;
   if (listId) {
     list = await findList(listId);
     const latest = await db().prepare('SELECT id, number FROM versions WHERE shortlist_id = ? ORDER BY number DESC LIMIT 1').bind(listId).first<{ id: string; number: number }>();
     if (!Object.hasOwn(input, 'expected_latest_version_id') || input.expected_latest_version_id !== (latest?.id || null)) throw new InputError('Another version exists. Read the latest versions and retry with expected_latest_version_id.', 409);
     number = (latest?.number || 0) + 1;
+    latestVersionId = latest?.id || null;
   } else {
     list = { id: id(), company: string(input.company, 'Company', 120, true), role: string(input.role, 'Role', 180, true), round: string(input.round, 'Round', 80, true), season: string(input.season, 'Season', 40, true), notes: string(input.notes, 'Public notes', 1500), created_at: now(), updated_at: now(), published_version_id: null };
     const duplicate = await db().prepare('SELECT id, deleted_at FROM shortlists WHERE lower(company) = lower(?) AND lower(role) = lower(?) AND lower(round) = lower(?) AND lower(season) = lower(?)').bind(list.company, list.role, list.round, list.season).first<{ id: string; deleted_at: string | null }>();
     if (duplicate) return json({ error: duplicate.deleted_at ? 'This shortlist was deleted. Ask the owner to restore it before creating a new version.' : 'This company, role, round and season already exist. Create a new version instead.', shortlist_id: duplicate.id }, 409);
+  }
+  if (mailJobId) {
+    if ((await mailVersions(mailJobId)).results.some(version => version.shortlist_id === list.id)) throw new InputError('This mail job already has a result for this shortlist. Resume or reuse that result.', 409);
+    for (const existingId of new Set([latestVersionId, list.published_version_id].filter((value): value is string => !!value))) {
+      const existing = await findVersion(existingId, list.id);
+      if (sameShortlistRows(rows, await versionRows(existing))) return json({ error: 'This shortlist already has the same six-column result. Verify the event and reuse the published version through the mail job reuse endpoint; do not create another version.', duplicate: true, shortlist_id: list.id, version_id: existing.id, published: existing.id === list.published_version_id }, 409);
+    }
   }
   const versionId = id(), createdAt = now(), key = `shortlists/${list.id}/${versionId}.json`;
   await bucket().put(key, JSON.stringify(rows), { httpMetadata: { contentType: 'application/json' } });
@@ -234,7 +246,7 @@ export async function handle(request: Request): Promise<Response> {
         if (!['pending', 'processing', 'needs_review', 'done', 'ignored', 'all'].includes(status)) throw new InputError('Invalid mail job status.');
         const limit = Math.floor(Math.min(50, Math.max(1, Number(url.searchParams.get('limit')) || 20)));
         const where = status === 'all' ? '' : status === 'pending' ? "WHERE status = 'pending' OR (status = 'processing' AND lease_until <= ?)" : 'WHERE status = ?';
-        const query = db().prepare(`SELECT ${fields} FROM mail_jobs ${where} ORDER BY created_at ASC LIMIT ?`);
+        const query = db().prepare(`SELECT ${fields} FROM mail_jobs ${where} ORDER BY coalesce(received_at, created_at) DESC, created_at DESC, id DESC LIMIT ?`);
         const result = await (status === 'all' ? query.bind(limit) : query.bind(status === 'pending' ? now() : status, limit)).all();
         return json({ jobs: result.results.map(row => ({ ...row, result_version_ids: JSON.parse(row.result_version_ids as string) })), limit });
       }
@@ -242,7 +254,7 @@ export async function handle(request: Request): Promise<Response> {
         const job = await db().prepare(`SELECT ${fields}, object_key, source_upload_ids FROM mail_jobs WHERE id = ?`).bind(item).first<Record<string, unknown>>();
         if (!job) throw new InputError('Mail job not found.', 404);
         const object = await bucket().get(job.object_key as string); if (!object) throw new InputError('Mail source is unavailable.', 503);
-        const versions = await db().prepare('SELECT v.id, v.shortlist_id, v.number, v.row_count, v.published_at, s.company, s.role, s.round, s.season, s.published_version_id, s.deleted_at FROM versions v JOIN shortlists s ON s.id = v.shortlist_id WHERE v.source_mail_job_id = ? ORDER BY v.created_at').bind(item).all();
+        const versions = await mailVersions(item);
         const { object_key: _key, ...metadata } = job;
         return json({ job: { ...metadata, result_version_ids: JSON.parse(job.result_version_ids as string), source_upload_ids: JSON.parse(job.source_upload_ids as string) }, source: await object.json(), versions: versions.results });
       }
@@ -252,10 +264,26 @@ export async function handle(request: Request): Promise<Response> {
         if (result.meta.changes !== 1) throw new InputError('Job is already claimed, finished or awaiting review. Refresh the queue.', 409);
         await log('mail_job_claimed', user.id, item); return json({ id: item, lease_token: token, lease_until: until });
       }
+      if (method === 'POST' && item && action === 'reuse') {
+        const input = await body(request); await mailLease(db(), item, input.lease_token);
+        const note = string(input.note, 'Duplicate event and candidate evidence', 24000, true);
+        const list = await findList(string(input.shortlist_id, 'shortlist_id', 80, true));
+        const version = await findVersion(string(input.version_id, 'version_id', 80, true), list.id);
+        if (!version.published_at || version.id !== list.published_version_id) throw new InputError('Only the current published version can be reused. Review a draft or changed result instead.', 409);
+        const linked = (await mailVersions(item)).results;
+        if (linked.some(value => value.shortlist_id === list.id && value.id !== version.id)) throw new InputError('This job already has a different result for that shortlist. Review the conflict.', 409);
+        const job = await db().prepare('SELECT result_version_ids FROM mail_jobs WHERE id = ?').bind(item).first<{ result_version_ids: string }>();
+        const ids = [...new Set([...(JSON.parse(job!.result_version_ids) as string[]), version.id])];
+        const result = await db().prepare("UPDATE mail_jobs SET result_version_ids = ?, note = ?, updated_at = ? WHERE id = ? AND status = 'processing' AND lease_hash = ? AND lease_until > ? AND result_version_ids = ? AND EXISTS (SELECT 1 FROM shortlists WHERE id = ? AND published_version_id = ? AND deleted_at IS NULL) AND NOT EXISTS (SELECT 1 FROM versions WHERE source_mail_job_id = ? AND shortlist_id = ? AND id != ?)")
+          .bind(JSON.stringify(ids), note, now(), item, await mailHash(input.lease_token as string), now(), job!.result_version_ids, list.id, version.id, item, list.id, version.id).run();
+        if (result.meta.changes !== 1) throw new InputError('The job or published result changed. Refresh before reusing it.', 409);
+        await log('mail_result_reused', user.id, item);
+        return json({ id: item, reused: true, shortlist_id: list.id, version_id: version.id, public_url: `${url.origin}/?list=${list.id}` });
+      }
       if (method === 'POST' && item && ['complete', 'review', 'ignore'].includes(action)) {
         const input = await body(request); await mailLease(db(), item, input.lease_token);
         const note = string(input.note, 'Processing note', 24000, action !== 'complete');
-        const versions = await db().prepare('SELECT v.id, v.published_at, s.published_version_id, s.deleted_at FROM versions v JOIN shortlists s ON s.id = v.shortlist_id WHERE v.source_mail_job_id = ?').bind(item).all<{ id: string; published_at: string | null; published_version_id: string | null; deleted_at: string | null }>();
+        const versions = await mailVersions(item);
         if (action === 'complete' && (!versions.results.length || versions.results.some(version => !version.published_at || version.deleted_at || version.published_version_id !== version.id))) throw new InputError('Every draft linked to this mail job must be the current public version before completion. Otherwise mark the job for review.');
         if (action === 'ignore' && versions.results.length) throw new InputError('This mail job already has draft or published results. Mark it for review instead.');
         const status = action === 'complete' ? 'done' : action === 'review' ? 'needs_review' : 'ignored';
@@ -370,9 +398,10 @@ function openapi(origin: string) {
     '/mail/config': { put: { operationId: 'configureMail', summary: 'Owner only: mailbox folder, lookback, sender and link-domain rules', security: ownerOnly, requestBody: bodySchema({ type: 'object', required: ['enabled','folder','lookback_days','senders','link_domains'], properties: { enabled: { type: 'boolean' }, folder: { type: 'string' }, lookback_days: { type: 'integer', minimum: 1, maximum: 365 }, senders: { type: 'array', items: { type: 'string' } }, link_domains: { type: 'array', items: { type: 'string' } } } }), responses: response } },
     '/mail/sync': { post: { operationId: 'syncMail', summary: 'Read matching mail into a private queue; repeat while more is true', security: secured, responses: { ...response, '502': { description: 'IITK IMAP sync failed' }, '503': { description: 'Mail credentials have not been configured' } } } },
     '/mail/import': { post: { operationId: 'importOwnMail', summary: 'Owner only: import an owned EML message for testing or manual ingestion', security: ownerOnly, requestBody: { required: true, content: { 'message/rfc822': { schema: { type: 'string', format: 'binary' } } } }, responses: { ...response, '201': { description: 'Queued, duplicate or sender/keyword-filtered message' } } } },
-    '/mail-jobs': { get: { operationId: 'listMailJobs', summary: 'Private queue; pending includes expired job claims', security: secured, parameters: [{ name: 'status', in: 'query', schema: { type: 'string', enum: ['pending','processing','needs_review','done','ignored','all'], default: 'pending' } }, { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 50 } }], responses: response } },
+    '/mail-jobs': { get: { operationId: 'listMailJobs', summary: 'Private queue, newest received first; pending includes expired job claims', security: secured, parameters: [{ name: 'status', in: 'query', schema: { type: 'string', enum: ['pending','processing','needs_review','done','ignored','all'], default: 'pending' } }, { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 50 } }], responses: response } },
     '/mail-jobs/{id}': { parameters: [parameter], get: { operationId: 'readMailJob', summary: 'Private email text, attachments, links and previously prepared results', security: secured, responses: response } },
     '/mail-jobs/{id}/claim': { parameters: [parameter], post: { operationId: 'claimMailJob', summary: 'Exclusively claim a pending/expired job for two hours; returns lease_token once', security: secured, responses: response } },
+    '/mail-jobs/{id}/reuse': { parameters: [parameter], post: { operationId: 'reuseMailResult', summary: 'Reuse the current published result for a verified duplicate event/candidate list without another draft', security: secured, requestBody: bodySchema({ type: 'object', required: ['lease_token','shortlist_id','version_id','note'], properties: { lease_token: { type: 'string' }, shortlist_id: { type: 'string' }, version_id: { type: 'string' }, note: { type: 'string', description: 'Explain matching company, role, round, event date/time and candidate evidence.' } } }), responses: response } },
     '/mail-jobs/{id}/complete': { parameters: [parameter], post: { operationId: 'completeMailJob', summary: 'Complete a claimed job after every linked result is currently published', security: secured, requestBody: mailAction, responses: response } },
     '/mail-jobs/{id}/review': { parameters: [parameter], post: { operationId: 'reviewMailJob', summary: 'Leave an unresolved job for owner review; note is required', security: secured, requestBody: mailAction, responses: response } },
     '/mail-jobs/{id}/ignore': { parameters: [parameter], post: { operationId: 'ignoreMailJob', summary: 'Ignore an irrelevant claimed email with an explanation', security: secured, requestBody: mailAction, responses: response } },
