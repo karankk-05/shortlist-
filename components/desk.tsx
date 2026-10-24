@@ -1,5 +1,5 @@
 'use client';
-import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent, type ReactNode } from 'react';
 import { ArrowDown, ArrowDownToLine, ArrowLeft, ArrowRight, ArrowUp, ArrowUpDown, BookOpen, Check, CheckCircle2, ChevronLeft, ChevronRight, CircleHelp, Clipboard, Eye, EyeOff, FileSpreadsheet, Files, FolderOpen, KeyRound, Layers, LoaderCircle, LockKeyhole, LogOut, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Sparkles, Trash2, Upload, X } from 'lucide-react';
 import { COLUMNS, StudentRow, validateRows } from '@/lib/records';
 import { agentGuide } from '@/lib/agent-guide';
@@ -10,6 +10,7 @@ import { exportCandidateRows, type IdentityReview } from '@/lib/identity-review'
 import ShortlistLibrary from './shortlist-library';
 import ThemeToggle from './theme-toggle';
 import Collapsible from './collapsible';
+import { readLibraryView, saveLibraryView } from '@/lib/library-view';
 
 type View = 'library' | 'upload' | 'guide' | 'admin' | 'mail';
 type Session = { role: 'public' | 'uploader' | 'admin'; label: string | null; owner_configured: boolean; owner_entry_path?: string | null };
@@ -18,6 +19,7 @@ type Master = { id: string; name: string; row_count: number; cpi_count: number; 
 type Version = { id: string; number: number; row_count: number; unresolved_count: number; published_at: string | null; processing_notes: string; warnings: { row: number; roll: string; issues: string[] }[]; created_at: string };
 type Draft = { shortlist_id: string; version_id: string; row_count: number; number: number; warnings: { row: number; roll: string; issues: string[] }[]; expected_current_version_id: string | null; public_url: string };
 type StoredFile = { id: string; filename: string; size: number; created_at: string };
+type ShortlistDetail = { shortlist: Listing; rows: StudentRow[]; unresolved_candidates: IdentityReview[]; version: Version };
 const labels: Record<View, string> = { library: 'Shortlists', upload: 'Upload workspace', guide: 'Agent workflow', admin: 'Owner settings', mail: 'Mail workflow' };
 async function api<T = any>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch('/api/v1/' + path, { cache: 'no-store', credentials: 'same-origin', ...options, headers: { ...(options?.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }), ...options?.headers } });
@@ -170,13 +172,64 @@ export default function Desk({ initialView }: { initialView: View }) {
   const [session, setSession] = useState<Session>({ role: 'public', label: null, owner_configured: true });
   const [lists, setLists] = useState<Listing[]>([]), [loading, setLoading] = useState(true), [error, setError] = useState('');
   const [companyGroups, setCompanyGroups] = useState<CompanyGroup<Listing>[]>([]), [roundCategories, setRoundCategories] = useState<string[]>([]);
-  const [detail, setDetail] = useState<{ shortlist: Listing; rows: StudentRow[]; unresolved_candidates: IdentityReview[]; version: Version } | null>(null);
-  const [query, setQuery] = useState(''), [round, setRound] = useState(''), [origin, setOrigin] = useState('');
+  const [selectedId, setSelectedId] = useState(() => initialView === 'library' ? new URLSearchParams(location.search).get('list') || null : null);
+  const [detailResult, setDetailResult] = useState<{ id: string; data?: ShortlistDetail; error?: string } | null>(null);
+  const [detailAttempt, setDetailAttempt] = useState(0);
+  const [libraryView, setLibraryView] = useState(readLibraryView);
+  const libraryScroll = useRef(libraryView.scrollY);
+  const { query, round } = libraryView;
+  const detail = detailResult?.id === selectedId ? detailResult.data : undefined;
+  const detailError = detailResult?.id === selectedId ? detailResult.error : undefined;
+  const [origin, setOrigin] = useState('');
   const refresh = useCallback(async () => {
     try { const [me, result] = await Promise.all([api<Session>('me'), api('shortlists?grouped=1')]); setSession(me); setLists(result.shortlists); setCompanyGroups(result.company_groups); setRoundCategories(result.round_categories); setError(''); }
     catch (error) { setError((error as Error).message); } finally { setLoading(false); }
   }, []);
-  useEffect(() => { setOrigin(location.origin); refresh(); const list = new URLSearchParams(location.search).get('list'); if (list && initialView === 'library') api('shortlists/' + encodeURIComponent(list)).then(setDetail).catch(error => setError(error.message)); }, [refresh, initialView]);
+  useEffect(() => { setOrigin(location.origin); void refresh(); }, [refresh]);
+  useEffect(() => {
+    if (!selectedId) return;
+    const controller = new AbortController();
+    api<ShortlistDetail>('shortlists/' + encodeURIComponent(selectedId), { signal: controller.signal })
+      .then(data => { if (!controller.signal.aborted) setDetailResult({ id: selectedId, data }); })
+      .catch(error => { if (!controller.signal.aborted) setDetailResult({ id: selectedId, error: error.message }); });
+    return () => controller.abort();
+  }, [selectedId, detailAttempt]);
+  useEffect(() => { saveLibraryView({ ...libraryView, scrollY: libraryScroll.current }); }, [libraryView]);
+  const navigateLibrary = useCallback((id: string | null, push = true) => {
+    if (initialView !== 'library' || id === selectedId) return;
+    if (!selectedId) {
+      libraryScroll.current = window.scrollY;
+      saveLibraryView({ ...libraryView, scrollY: libraryScroll.current });
+    }
+    if (push && selectedId !== id) history.pushState(null, '', id ? '/?list=' + encodeURIComponent(id) : '/');
+    setDetailResult(null);
+    setSelectedId(id);
+    if (id) window.scrollTo(0, 0);
+  }, [initialView, selectedId, libraryView]);
+  useEffect(() => {
+    if (initialView !== 'library') return;
+    const previous = history.scrollRestoration;
+    history.scrollRestoration = 'manual';
+    return () => { history.scrollRestoration = previous; };
+  }, [initialView]);
+  useEffect(() => {
+    if (initialView !== 'library') return;
+    const pop = () => navigateLibrary(new URLSearchParams(location.search).get('list') || null, false);
+    const remember = () => saveLibraryView({ ...libraryView, scrollY: selectedId ? libraryScroll.current : window.scrollY });
+    window.addEventListener('popstate', pop);
+    window.addEventListener('pagehide', remember);
+    return () => { window.removeEventListener('popstate', pop); window.removeEventListener('pagehide', remember); };
+  }, [initialView, navigateLibrary, libraryView, selectedId]);
+  useLayoutEffect(() => {
+    if (initialView !== 'library' || selectedId || loading) return;
+    const position = libraryScroll.current;
+    const frame = requestAnimationFrame(() => window.scrollTo(0, position));
+    return () => cancelAnimationFrame(frame);
+  }, [initialView, selectedId, loading]);
+  function openLibrary(event: MouseEvent<HTMLAnchorElement>) {
+    if (initialView !== 'library' || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault(); navigateLibrary(null);
+  }
   const authorised = session.role !== 'public';
   const search = query.trim().toLowerCase();
   const shownGroups = companyGroups.map(group => {
@@ -184,10 +237,10 @@ export default function Desk({ initialView }: { initialView: View }) {
     return { ...group, shortlists: group.shortlists.filter(matches), rounds: group.rounds.map(stage => ({ ...stage, roles: stage.roles.map(role => ({ ...role, shortlists: role.shortlists.filter(matches) })).filter(role => role.shortlists.length) })).filter(stage => stage.roles.length) };
   }).filter(group => group.shortlists.length);
   const heading = (title: string, eyebrow: string, subtitle: string, action?: ReactNode) => <div className="heading-row"><div>{eyebrow && <div className="eyebrow">{eyebrow}</div>}<h1>{title}</h1>{subtitle && <p className="lede">{subtitle}</p>}</div>{action}</div>;
-  const brand = <a className="brand" href="/"><span className="brandmark"><Layers size={22} strokeWidth={1.6} /></span><span><strong>shortlist desk</strong><small>IIT KANPUR</small></span></a>;
+  const brand = <a className="brand" href="/" onClick={openLibrary}><span className="brandmark"><Layers size={22} strokeWidth={1.6} /></span><span><strong>shortlist desk</strong><small>IIT KANPUR</small></span></a>;
   return <div className={'shell' + (authorised ? '' : ' public-shell')}>
     {authorised && <aside className="sidebar">{brand}<div className="navgroup"><div className="navlabel">WORKSPACE</div><nav>
-      <a className={'navitem ' + (initialView === 'library' ? 'active' : '')} href="/"><FolderOpen size={17} />Company shortlists<span className="navcount">{lists.length}</span></a>
+      <a className={'navitem ' + (initialView === 'library' ? 'active' : '')} href="/" onClick={openLibrary}><FolderOpen size={17} />Company shortlists<span className="navcount">{lists.length}</span></a>
       <a className={'navitem ' + (initialView === 'upload' ? 'active' : '')} href="/upload"><Upload size={17} />Upload workspace</a>
       <a className={'navitem ' + (initialView === 'mail' ? 'active' : '')} href="/mail"><Files size={17} />Mail workflow</a>
       <a className={'navitem ' + (initialView === 'guide' ? 'active' : '')} href="/guide"><Sparkles size={17} />Agent workflow</a>
@@ -197,7 +250,7 @@ export default function Desk({ initialView }: { initialView: View }) {
       {authorised ? <div className="breadcrumbs"><span>Workspace</span><ChevronRight size={11} /><strong>{labels[initialView]}</strong></div> : brand}
       <div className="top-actions"><ThemeToggle />{authorised && <button className="quiet" onClick={async () => { try { await api('session', { method: 'DELETE' }); await refresh(); } catch (error) { setError((error as Error).message); } }}><LogOut size={13} />Log out</button>}</div>
     </header><main className="content">{error && <Alert message={error} />}
-      {initialView === 'library' && !detail && <>
+      {initialView === 'library' && <div className="library-view" hidden={Boolean(selectedId)}>
         {heading('Company shortlists', '', '', authorised ? <a href="/upload" className="primary"><Upload size={14} />Upload shortlist</a> : undefined)}
         <section className="stats" aria-label="Library statistics">
           <div className="stat"><span className="stat-icon"><FolderOpen size={19} /></span><div><div className="stat-number">{loading ? '—' : format(lists.length)}</div><span className="stat-label">Published shortlists</span></div></div>
@@ -205,12 +258,15 @@ export default function Desk({ initialView }: { initialView: View }) {
           <div className="stat"><span className="stat-icon"><CheckCircle2 size={19} /></span><div><div className="stat-number small">{loading ? '—' : lists.length ? date(lists[0].added_at) : '—'}</div><span className="stat-label">Latest addition</span></div></div>
         </section>
         <section className="panel" aria-label="Company shortlists">
-          <div className="toolbar"><label className="search"><Search size={15} /><input aria-label="Search companies" placeholder="Search company or position…" value={query} onChange={e => setQuery(e.target.value)} /></label><select aria-label="Filter by round" value={round} onChange={e => setRound(e.target.value)}><option value="">All rounds</option>{roundCategories.map(value => <option key={value}>{value}</option>)}</select></div>
-          {loading ? <div className="loading"><Busy /> Loading shortlists…</div> : lists.length === 0 ? <div className="empty"><h3>No shortlists yet.</h3></div> : <ShortlistLibrary groups={shownGroups} filterKey={search || round ? search + "|" + round : ""} />}
+          <div className="toolbar"><label className="search"><Search size={15} /><input aria-label="Search companies" placeholder="Search company or position…" value={query} onChange={e => setLibraryView(previous => ({ ...previous, query: e.target.value }))} /></label><select aria-label="Filter by round" value={round} onChange={e => setLibraryView(previous => ({ ...previous, round: e.target.value }))}><option value="">All rounds</option>{roundCategories.map(value => <option key={value}>{value}</option>)}</select></div>
+          {loading ? <div className="loading"><Busy /> Loading shortlists…</div> : lists.length === 0 ? <div className="empty"><h3>No shortlists yet.</h3></div> : <ShortlistLibrary groups={shownGroups} filterKey={search || round ? JSON.stringify([search, round]) : ''} expanded={libraryView.expanded} onToggle={(key, open) => setLibraryView(previous => ({ ...previous, expanded: { ...previous.expanded, [key]: open } }))} onOpen={navigateLibrary} />}
         </section>
+      </div>}
+      {initialView === 'library' && selectedId && <>
+        <a href="/" className="back" onClick={openLibrary}><ArrowLeft size={13} />All company shortlists</a>
+        {!detail && (detailError ? <section className="panel cardbody"><Alert message={detailError} /><button className="secondary" onClick={() => { setDetailResult(null); setDetailAttempt(value => value + 1); }}><RotateCcw size={14} />Try again</button></section> : <section className="panel shortlist-loading" role="status" aria-live="polite" aria-busy="true"><LoaderCircle className="spinner" size={25} /><span>Loading shortlist…</span></section>)}
       </>}
       {initialView === 'library' && detail && <>
-        <a href="/" className="back"><ArrowLeft size={13} />All company shortlists</a>
         {heading(detail.shortlist.company, `${detail.shortlist.season} / ${detail.shortlist.round}`, detail.shortlist.role, authorised ? <div className="top-actions">
           {session.role === 'admin' && <DeleteShortlist list={detail.shortlist} onError={setError} onDeleted={() => { location.href = '/'; }} />}
           <a className="secondary" href={`/api/v1/shortlists/${detail.shortlist.id}/export.csv`}><ArrowDownToLine size={13} />CSV</a><button className="primary" onClick={() => exportXlsx(exportCandidateRows({ rows: detail.rows, unresolved_candidates: detail.unresolved_candidates || [] }), detail.shortlist.company + '_shortlist').catch(error => setError(error.message))}><ArrowDownToLine size={13} />Excel</button>
