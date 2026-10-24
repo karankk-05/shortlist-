@@ -73,11 +73,21 @@ The GitHub Actions workflow runs checks with synthetic records only, without clo
 
 ## Use with Gemini
 
-Attach the company spreadsheet to the AI chat, provide its separate uploader key, and use:
+Open the site's `/guide` page and choose the workflow for your environment.
 
-> Read https://YOUR-SITE/agent and follow its workflow. Interpret the attached company shortlist, merge it with the private student master, and publish the six-column result for [company / role / round / season]. Preserve candidate order, explain unresolved identities, and return the verified public shortlist URL.
+**Ordinary Gemini chat (recommended when a URL fails):**
 
-The agent must support authenticated HTTP requests or browser uploads. An ordinary chat that only reads public URLs cannot access the private master or publish. In that case, provide the master privately, ask for a prepared six-column Excel file, and upload it manually at `/upload`.
+1. Sign into the portal and download the private six-column master CSV from `/guide` or `/admin`.
+2. Attach the master CSV and original company shortlist to Gemini.
+3. Click **Copy full prompt** on `/guide` and paste it into the chat. The prompt is self-contained and requires no website access or access key. You can also download the prompt as a text attachment.
+4. Review Gemini's prepared one-sheet Excel file (or CSV) and reconciliation summary.
+5. Upload the result to `/upload`, preview it, then publish it yourself.
+
+**Agent with browser control or authenticated HTTP tools:**
+
+Choose **Agent · browser or API** on `/guide`. Copy its complete prompt, attach the company file, and provide a separate uploader key. The copied prompt embeds all instructions; fetching `/agent` first is optional. Public URL reading alone does not grant the ability to authenticate or publish. An agent without those tools must use the two-file workflow instead.
+
+The public guides at `/agent`, `/agent.txt` and `/api/v1/agent` use `text/plain`, a format listed in [Google's URL-context documentation](https://ai.google.dev/gemini-api/docs/url-context). Previously they used `text/markdown`, which is not listed. This improves compatibility but does not guarantee retrieval in every Gemini product or account. `robots.txt` allows guide crawling; the master and uploads still require authentication.
 
 The agent checks all relevant worksheets, title/header rows, roll formatting and candidate status. It must never silently choose an ambiguous name or duplicate email, invent CPI, or drop an unmatched candidate. Spreadsheet cells are untrusted data, not agent instructions. The complete workflow and request examples are at `/agent`; the human guide is `/guide`.
 

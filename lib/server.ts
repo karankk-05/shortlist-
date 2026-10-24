@@ -166,7 +166,7 @@ export async function handle(request: Request): Promise<Response> {
     if (parts.length > 3) throw new InputError('Endpoint not found.', 404);
     const [resource, item, action] = parts;
     if (method === 'GET' && resource === 'health') return json({ status: 'ok', service: 'shortlist-desk', version: 1, merging: 'external-agent' });
-    if (method === 'GET' && resource === 'agent') return plain(agentGuide(url.origin), 'text/markdown; charset=utf-8');
+    if (method === 'GET' && resource === 'agent') return plain(agentGuide(url.origin));
     if (method === 'GET' && resource === 'openapi.json') return json(openapi(url.origin));
     if (method === 'GET' && resource === 'me') {
       const user = await actor(request);

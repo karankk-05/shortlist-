@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /agent
+Allow: /guide
+Disallow: /admin
+Disallow: /upload
+Disallow: /api/v1/master
+Disallow: /api/v1/uploads
+Disallow: /api/v1/keys
+Disallow: /api/v1/session

@@ -24,6 +24,20 @@ try {
   }
   if (!ready) throw new Error('Preview failed to start: ' + logs);
 let ownerCookie = '', uploaderKey = '', count = 0;
+for (const path of ['/agent', '/agent.txt', '/api/v1/agent']) {
+  const response = await fetch(origin + path);
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type'), /^text\/plain/);
+  const guide = await response.text();
+  assert.ok(guide.includes(origin + '/api/v1/master'));
+  assert.ok(guide.includes('name, roll, programme, branch, cpi, email'));
+  count++;
+}
+const robots = await fetch(origin + '/robots.txt');
+assert.equal(robots.status, 200);
+assert.match(robots.headers.get('content-type'), /^text\/plain/);
+assert.match(await robots.text(), /Allow: \/agent/); count++;
+
 async function call(path, { method = 'GET', owner = false, key = false, data, expected = 200, cookie, evil = false, form } = {}) {
   const response = await fetch(origin + '/api/v1/' + path, { method, headers: { ...(owner ? { Cookie: ownerCookie } : cookie ? { Cookie: cookie } : {}), ...(key ? { Authorization: `Bearer ${uploaderKey}` } : {}), ...(data ? { 'Content-Type': 'application/json' } : {}), ...(method !== 'GET' ? { Origin: evil ? 'https://evil.example.invalid' : origin } : {}) }, body: form || (data ? JSON.stringify(data) : undefined), redirect: 'manual' });
   const result = response.headers.get('Content-Type')?.includes('application/json') ? await response.json() : await response.text();
