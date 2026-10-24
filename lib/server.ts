@@ -6,11 +6,12 @@ import { mailConfig, mailHash, mailLease, mailStatus, saveMail, syncMail } from 
 import { validateMailConfig } from './mail-content';
 import { cleanupMail, MAIL_RETENTION_DAYS } from './mail-retention';
 import { groupShortlists } from './shortlist-groups';
+import { exportCandidateRows, readShortlistData, sameIdentityReviews, validateIdentityReviews, type ShortlistData } from './identity-review';
 import { COLUMNS, csvRows, InputError, sameShortlistRows, StudentRow, toCSV, validateRows } from './records';
 
 type Actor = { role: 'admin' | 'uploader'; id: string; label: string };
 type List = { id: string; company: string; role: string; round: string; season: string; notes: string; published_version_id: string | null; created_at: string; updated_at: string };
-type Version = { id: string; shortlist_id: string; number: number; object_key: string; row_count: number; master_id: string; processing_notes: string; warnings: string; source_upload_ids: string; created_at: string; published_at: string | null; source_mail_job_id: string | null };
+type Version = { id: string; shortlist_id: string; number: number; object_key: string; row_count: number; unresolved_count: number; master_id: string; processing_notes: string; warnings: string; source_upload_ids: string; created_at: string; published_at: string | null; source_mail_job_id: string | null };
 type Master = { id: string; name: string; object_key: string; row_count: number; cpi_count: number; created_at: string; source_hash: string };
 type Data = Record<string, unknown>;
 const db = () => { if (!env.DB) throw new InputError('Database is not connected yet.', 503); return env.DB; };
@@ -87,14 +88,15 @@ async function findVersion(versionId: string, listId: string) {
   const version = await db().prepare('SELECT * FROM versions WHERE id = ? AND shortlist_id = ?').bind(versionId, listId).first<Version>();
   if (!version) throw new InputError('Version not found.', 404); return version;
 }
-async function versionRows(version: Version) {
-  const object = await bucket().get(version.object_key); if (!object) throw new InputError('The shortlist file is temporarily unavailable.', 503); return object.json<StudentRow[]>();
+async function versionData(version: Version) {
+  const object = await bucket().get(version.object_key); if (!object) throw new InputError('The shortlist file is temporarily unavailable.', 503);
+  return readShortlistData(await object.json<StudentRow[] | ShortlistData>());
 }
 async function mailVersions(jobId: string) {
-  return db().prepare('SELECT v.id, v.shortlist_id, v.number, v.row_count, v.published_at, s.company, s.role, s.round, s.season, s.published_version_id, s.deleted_at FROM versions v JOIN shortlists s ON s.id = v.shortlist_id WHERE v.source_mail_job_id = ? OR v.id IN (SELECT value FROM json_each((SELECT result_version_ids FROM mail_jobs WHERE id = ?))) ORDER BY v.created_at')
-    .bind(jobId, jobId).all<{ id: string; shortlist_id: string; published_at: string | null; published_version_id: string | null; deleted_at: string | null }>();
+  return db().prepare('SELECT v.id, v.shortlist_id, v.number, v.row_count, v.unresolved_count, v.published_at, s.company, s.role, s.round, s.season, s.published_version_id, s.deleted_at FROM versions v JOIN shortlists s ON s.id = v.shortlist_id WHERE v.source_mail_job_id = ? OR v.id IN (SELECT value FROM json_each((SELECT result_version_ids FROM mail_jobs WHERE id = ?))) ORDER BY v.created_at')
+    .bind(jobId, jobId).all<{ id: string; shortlist_id: string; unresolved_count: number; published_at: string | null; published_version_id: string | null; deleted_at: string | null }>();
 }
-const publicVersion = (version: Version) => ({ id: version.id, number: version.number, row_count: version.row_count, created_at: version.created_at, published_at: version.published_at });
+const publicVersion = (version: Version) => ({ id: version.id, number: version.number, row_count: version.row_count, unresolved_count: version.unresolved_count, candidate_count: version.row_count + version.unresolved_count, created_at: version.created_at, published_at: version.published_at });
 async function log(action: string, actorId: string, target: string) {
   await db().prepare('INSERT INTO audit (id, action, actor, target_id, created_at) VALUES (?, ?, ?, ?, ?)').bind(id(), action, actorId, target, now()).run();
 }
@@ -117,10 +119,13 @@ async function writeMaster(request: Request) {
 async function createDraft(request: Request, listId?: string) {
   const user = await access(request); const input = await body(request);
   if (input.rows !== undefined && input.csv_text !== undefined) throw new InputError('Supply rows or csv_text, not both.');
-  const { rows, warnings } = validateRows(typeof input.csv_text === 'string' ? csvRows(input.csv_text) : input.rows);
+  const { rows, warnings } = validateRows(typeof input.csv_text === 'string' ? csvRows(input.csv_text) : input.rows, Array.isArray(input.unresolved_candidates) && input.unresolved_candidates.length > 0);
   const masterId = string(input.master_id, 'master_id', 80, true);
-  const master = await db().prepare('SELECT id FROM masters WHERE id = ?').bind(masterId).first();
+  const master = await db().prepare('SELECT * FROM masters WHERE id = ?').bind(masterId).first<Master>();
   if (!master) throw new InputError('Choose an existing private master version.');
+  const unresolved = validateIdentityReviews(input.unresolved_candidates, Array.isArray(input.unresolved_candidates) && input.unresolved_candidates.length ? await masterRows(master) : []);
+  if (rows.length + unresolved.length > 15000) throw new InputError('Provide at most 15,000 source candidates including unresolved entries.');
+  for (const entry of unresolved) warnings.push({ row: entry.source_index, roll: '', issues: ['unresolved_identity'] });
   const processingNotes = string(input.processing_notes, 'processing_notes', 24000);
   if (input.source_upload_ids !== undefined && (!Array.isArray(input.source_upload_ids) || input.source_upload_ids.length > 20 || input.source_upload_ids.some(value => typeof value !== 'string' || value.length > 80))) throw new InputError('Invalid source_upload_ids.');
   const sourceIds = (input.source_upload_ids || []) as string[];
@@ -146,15 +151,16 @@ async function createDraft(request: Request, listId?: string) {
     if ((await mailVersions(mailJobId)).results.some(version => version.shortlist_id === list.id)) throw new InputError('This mail job already has a result for this shortlist. Resume or reuse that result.', 409);
     for (const existingId of new Set([latestVersionId, list.published_version_id].filter((value): value is string => !!value))) {
       const existing = await findVersion(existingId, list.id);
-      if (sameShortlistRows(rows, await versionRows(existing))) return json({ error: 'This shortlist already has the same six-column result. Verify the event and reuse the published version through the mail job reuse endpoint; do not create another version.', duplicate: true, shortlist_id: list.id, version_id: existing.id, published: existing.id === list.published_version_id }, 409);
+      const previous = await versionData(existing);
+      if (sameShortlistRows(rows, previous.rows) && sameIdentityReviews(unresolved, previous.unresolved_candidates)) return json({ error: 'This shortlist already has the same result and identity reviews. Verify the event and reuse the published version through the mail job reuse endpoint; do not create another version.', duplicate: true, shortlist_id: list.id, version_id: existing.id, published: existing.id === list.published_version_id }, 409);
     }
   }
   const versionId = id(), createdAt = now(), key = `shortlists/${list.id}/${versionId}.json`;
-  await bucket().put(key, JSON.stringify(rows), { httpMetadata: { contentType: 'application/json' } });
+  await bucket().put(key, JSON.stringify(unresolved.length ? { rows, unresolved_candidates: unresolved } : rows), { httpMetadata: { contentType: 'application/json' } });
   try {
     const statements = [];
     if (!listId) statements.push(db().prepare('INSERT INTO shortlists (id, company, role, round, season, notes, created_at, updated_at, published_version_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)').bind(list.id, list.company, list.role, list.round, list.season, list.notes, list.created_at, list.updated_at));
-    statements.push(db().prepare('INSERT INTO versions (id, shortlist_id, number, object_key, row_count, master_id, created_at, created_by, processing_notes, warnings, source_upload_ids, published_at, source_mail_job_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)').bind(versionId, list.id, number, key, rows.length, masterId, createdAt, user.id, processingNotes, JSON.stringify(warnings), JSON.stringify(sourceIds), mailJobId || null));
+    statements.push(db().prepare('INSERT INTO versions (id, shortlist_id, number, object_key, row_count, unresolved_count, master_id, created_at, created_by, processing_notes, warnings, source_upload_ids, published_at, source_mail_job_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)').bind(versionId, list.id, number, key, rows.length, unresolved.length, masterId, createdAt, user.id, processingNotes, JSON.stringify(warnings), JSON.stringify(sourceIds), mailJobId || null));
     statements.push(db().prepare('UPDATE shortlists SET updated_at = ? WHERE id = ?').bind(createdAt, list.id));
     await db().batch(statements);
   } catch (error) {
@@ -164,7 +170,7 @@ async function createDraft(request: Request, listId?: string) {
     throw error;
   }
   await log('draft_created', user.id, versionId);
-  return json({ shortlist_id: list.id, version_id: versionId, number, row_count: rows.length, warnings, published: false, expected_current_version_id: list.published_version_id, public_url: `${new URL(request.url).origin}/?list=${list.id}` }, 201);
+  return json({ shortlist_id: list.id, version_id: versionId, number, row_count: rows.length, unresolved_count: unresolved.length, candidate_count: rows.length + unresolved.length, warnings, published: false, expected_current_version_id: list.published_version_id, public_url: `${new URL(request.url).origin}/?list=${list.id}` }, 201);
 }
 
 async function publish(request: Request, listId: string, restore = false) {
@@ -174,7 +180,7 @@ async function publish(request: Request, listId: string, restore = false) {
   if (!Object.hasOwn(input, 'expected_current_version_id') || input.expected_current_version_id !== list.published_version_id) throw new InputError('The published version changed. Refresh before publishing.', 409);
   if (restore && !version.published_at) throw new InputError('Restore an already-published version.');
   const warnings = JSON.parse(version.warnings);
-  if (warnings.length && input.acknowledge_warnings !== true) throw new InputError('Review the draft warnings and set acknowledge_warnings to true before publication.');
+  if (warnings.some((warning: { issues: string[] }) => warning.issues.some(issue => issue !== 'unresolved_identity')) && input.acknowledge_warnings !== true) throw new InputError('Review the draft warnings and set acknowledge_warnings to true before publication.');
   const time = now();
   const [changed] = await db().batch([
     db().prepare('UPDATE shortlists SET published_version_id = ?, updated_at = ? WHERE id = ? AND published_version_id IS ? AND deleted_at IS NULL').bind(version.id, time, listId, list.published_version_id),
@@ -182,7 +188,7 @@ async function publish(request: Request, listId: string, restore = false) {
   ]);
   if (changed.meta.changes !== 1) throw new InputError('Another publisher changed this shortlist. Refresh and retry.', 409);
   await log(restore ? 'version_restored' : 'version_published', user.id, version.id);
-  return json({ shortlist_id: listId, version_id: version.id, published: true, public_url: `${new URL(request.url).origin}/?list=${listId}`, row_count: version.row_count });
+  return json({ shortlist_id: listId, version_id: version.id, published: true, public_url: `${new URL(request.url).origin}/?list=${listId}`, row_count: version.row_count, unresolved_count: version.unresolved_count, candidate_count: version.row_count + version.unresolved_count });
 }
 
 async function deleteShortlist(request: Request, listId: string, restore = false) {
@@ -296,7 +302,7 @@ export async function handle(request: Request): Promise<Response> {
         const input = await body(request); await mailLease(db(), item, input.lease_token);
         const note = string(input.note, 'Processing note', 24000, action !== 'complete');
         const versions = await mailVersions(item);
-        if (action === 'complete' && (!versions.results.length || versions.results.some(version => !version.published_at || version.deleted_at || version.published_version_id !== version.id))) throw new InputError('Every draft linked to this mail job must be the current public version before completion. Otherwise mark the job for review.');
+        if (action === 'complete' && (!versions.results.length || versions.results.some(version => !version.published_at || version.deleted_at || version.published_version_id !== version.id))) throw new InputError('Every result must be the current public version before completion. Otherwise mark the job for review.');
         if (action === 'ignore' && versions.results.length) throw new InputError('This mail job already has draft or published results. Mark it for review instead.');
         const status = action === 'complete' ? 'done' : action === 'review' ? 'needs_review' : 'ignored';
         const time = now();
@@ -359,12 +365,12 @@ export async function handle(request: Request): Promise<Response> {
     if (resource === 'shortlists') {
       if (method === 'GET' && item === 'deleted' && !action) {
         await access(request, true);
-        const result = await db().prepare(`SELECT s.*, ${listAddedAt} AS added_at, v.row_count, v.number AS version_number, (SELECT count(*) FROM versions WHERE shortlist_id = s.id) AS version_count FROM shortlists s ${listVersionJoins} WHERE s.deleted_at IS NOT NULL ORDER BY s.deleted_at DESC`).all();
+        const result = await db().prepare(`SELECT s.*, ${listAddedAt} AS added_at, v.row_count, v.unresolved_count, v.number AS version_number, (SELECT count(*) FROM versions WHERE shortlist_id = s.id) AS version_count FROM shortlists s ${listVersionJoins} WHERE s.deleted_at IS NOT NULL ORDER BY s.deleted_at DESC`).all();
         return json({ shortlists: result.results });
       }
       if (method === 'GET' && !item) {
         const drafts = url.searchParams.get('include_drafts') === '1'; if (drafts) await access(request);
-        const result = await db().prepare(`SELECT s.*, ${listAddedAt} AS added_at, v.row_count, v.number AS version_number, v.published_at, (SELECT count(*) FROM versions WHERE shortlist_id = s.id) AS version_count FROM shortlists s ${listVersionJoins} WHERE s.deleted_at IS NULL ${drafts ? '' : 'AND s.published_version_id IS NOT NULL'} ORDER BY added_at DESC, s.created_at DESC, s.id DESC`).all<List & { added_at: string }>();
+        const result = await db().prepare(`SELECT s.*, ${listAddedAt} AS added_at, v.row_count, v.unresolved_count, v.number AS version_number, v.published_at, (SELECT count(*) FROM versions WHERE shortlist_id = s.id) AS version_count FROM shortlists s ${listVersionJoins} WHERE s.deleted_at IS NULL ${drafts ? '' : 'AND s.published_version_id IS NOT NULL'} ORDER BY added_at DESC, s.created_at DESC, s.id DESC`).all<List & { added_at: string }>();
         return json({ shortlists: result.results, ...(url.searchParams.get('grouped') === '1' ? groupShortlists(result.results) : {}) });
       }
       if (method === 'DELETE' && item && !action) return await deleteShortlist(request, item);
@@ -383,9 +389,11 @@ export async function handle(request: Request): Promise<Response> {
         let versionId = list.published_version_id;
         if (url.searchParams.has('version_id')) { await access(request); versionId = url.searchParams.get('version_id'); }
         if (!versionId) throw new InputError('This shortlist has not been published.', 404);
-        const version = await findVersion(versionId, item), rows = await versionRows(version);
-        if (action === 'export.csv') return plain(toCSV(rows), 'text/csv; charset=utf-8', { 'Content-Disposition': `attachment; filename="${list.company.replace(/[^a-zA-Z0-9_-]/g, '_')}_shortlist.csv"` });
-        return json({ shortlist: list, version: publicVersion(version), columns: COLUMNS, rows });
+        const version = await findVersion(versionId, item), data = await versionData(version);
+        if (action === 'export.csv') {
+          return plain(toCSV(exportCandidateRows(data)), 'text/csv; charset=utf-8', { 'X-Unresolved-Candidates': String(data.unresolved_candidates.length), 'Content-Disposition': `attachment; filename="${list.company.replace(/[^a-zA-Z0-9_-]/g, '_')}_shortlist.csv"` });
+        }
+        return json({ shortlist: list, version: publicVersion(version), columns: COLUMNS, ...data });
       }
     }
     throw new InputError('Endpoint not found. See /api/v1/openapi.json.', 404);
@@ -401,7 +409,7 @@ function openapi(origin: string) {
   const ownerOnly = [{ OwnerKey: [] }];
   const student = { type: 'object', additionalProperties: false, required: COLUMNS, properties: Object.fromEntries(COLUMNS.map(key => [key, key === 'cpi' ? { type: ['number', 'null'], minimum: 0, maximum: 10 } : { type: 'string' }])) };
   const response = { '200': { description: 'Success' }, '400': { description: 'Invalid input' }, '401': { description: 'Access key or owner session required' }, '403': { description: 'Owner access required' }, '404': { description: 'Not found or deleted' }, '409': { description: 'Concurrent update or duplicate shortlist' } };
-  const draft = { type: 'object', properties: { company: { type: 'string' }, role: { type: 'string' }, round: { type: 'string' }, season: { type: 'string' }, master_id: { type: 'string' }, rows: { type: 'array', items: student }, csv_text: { type: 'string' }, processing_notes: { type: 'string' }, source_upload_ids: { type: 'array', items: { type: 'string' } }, expected_latest_version_id: { type: ['string', 'null'] }, mail_job_id: { type: 'string' }, mail_lease_token: { type: 'string' } }, required: ['master_id'] };
+  const draft = { type: 'object', properties: { company: { type: 'string' }, role: { type: 'string' }, round: { type: 'string' }, season: { type: 'string' }, master_id: { type: 'string' }, rows: { type: 'array', items: student }, unresolved_candidates: { type: 'array', maxItems: 1000, items: { type: 'object', additionalProperties: false, required: ['source_name', 'source_index', 'reason', 'possible_rolls'], properties: { source_name: { type: 'string', maxLength: 240 }, source_index: { type: 'integer', minimum: 1, maximum: 100000 }, reason: { type: 'string', maxLength: 500 }, possible_rolls: { type: 'array', maxItems: 20, uniqueItems: true, items: { type: 'string' }, description: 'Alternative master identifiers only. The server snapshots their six-column details; none is a confirmed shortlisted identity.' } } } }, csv_text: { type: 'string' }, processing_notes: { type: 'string' }, source_upload_ids: { type: 'array', items: { type: 'string' } }, expected_latest_version_id: { type: ['string', 'null'] }, mail_job_id: { type: 'string' }, mail_lease_token: { type: 'string' } }, required: ['master_id'] };
   const bodySchema = (schema: unknown) => ({ required: true, content: { 'application/json': { schema } } });
   const parameter = { name: 'id', in: 'path', required: true, schema: { type: 'string' } };
   const deleteBody = bodySchema({ type: 'object', required: ['expected_updated_at'], properties: { expected_updated_at: { type: 'string', description: 'updated_at from the latest shortlist metadata, to reject stale changes.' } } });
@@ -422,11 +430,11 @@ function openapi(origin: string) {
     '/mail-jobs/{id}/review': { parameters: [parameter], post: { operationId: 'reviewMailJob', summary: 'Leave an unresolved job for owner review; note is required', security: secured, requestBody: mailAction, responses: response } },
     '/mail-jobs/{id}/ignore': { parameters: [parameter], post: { operationId: 'ignoreMailJob', summary: 'Ignore an irrelevant claimed email with an explanation', security: secured, requestBody: mailAction, responses: response } },
     '/mail-jobs/{id}/retry': { parameters: [parameter], post: { operationId: 'retryMailJob', summary: 'Owner only: requeue a reviewed/ignored source', security: ownerOnly, responses: response } },
-    '/shortlists': { get: { operationId: 'listShortlists', summary: 'List published shortlists by added_at, newest first; optional server-generated company groups and round categories', parameters: [{ name: 'include_drafts', in: 'query', schema: { type: 'integer', enum: [1] }, description: 'Requires authentication when set.' }, { name: 'grouped', in: 'query', schema: { type: 'integer', enum: [1] }, description: 'Also return company_groups and normalized round_categories. Raw shortlists, original rounds and dates are preserved.' }], responses: response }, post: { operationId: 'createShortlistDraft', summary: 'Create a shortlist and its first draft', security: secured, requestBody: bodySchema(draft), responses: { ...response, '201': { description: 'Draft created; not public until published' } } } },
-    '/shortlists/{id}': { parameters: [parameter], get: { operationId: 'readShortlist', summary: 'Read current published six-column rows', responses: response }, delete: { operationId: 'deleteShortlist', summary: 'Owner only: hide a shortlist and retain its versions for recovery', security: ownerOnly, requestBody: deleteBody, responses: response } },
+    '/shortlists': { get: { operationId: 'listShortlists', summary: 'List published shortlists by added_at, newest first; optional server-generated company groups and round categories', parameters: [{ name: 'include_drafts', in: 'query', schema: { type: 'integer', enum: [1] }, description: 'Requires authentication when set.' }, { name: 'grouped', in: 'query', schema: { type: 'integer', enum: [1] }, description: 'Also return company_groups and normalized round_categories. Includes nested company_groups.rounds.roles.shortlists. Raw shortlists, original rounds and dates are preserved.' }], responses: response }, post: { operationId: 'createShortlistDraft', summary: 'Create a shortlist and its first draft', security: secured, requestBody: bodySchema(draft), responses: { ...response, '201': { description: 'Draft created; not public until published' } } } },
+    '/shortlists/{id}': { parameters: [parameter], get: { operationId: 'readShortlist', summary: 'Read confirmed six-column rows and separate unresolved_candidates with possible master matches', responses: response }, delete: { operationId: 'deleteShortlist', summary: 'Owner only: hide a shortlist and retain its versions for recovery', security: ownerOnly, requestBody: deleteBody, responses: response } },
     '/shortlists/deleted': { get: { operationId: 'listDeletedShortlists', summary: 'Owner only: list deleted shortlists', security: ownerOnly, responses: response } },
     '/shortlists/{id}/undelete': { parameters: [parameter], post: { operationId: 'undeleteShortlist', summary: 'Owner only: restore a deleted shortlist and its previous publication', security: ownerOnly, requestBody: deleteBody, responses: response } },
-    '/shortlists/{id}/export.csv': { parameters: [parameter], get: { operationId: 'downloadShortlist', summary: 'Download published CSV', responses: response } },
+    '/shortlists/{id}/export.csv': { parameters: [parameter], get: { operationId: 'downloadShortlist', summary: 'Download six-column CSV; ambiguous entries retain source names with blank identity fields. JSON retains all alternatives.', responses: response } },
     '/shortlists/{id}/versions': { parameters: [parameter], get: { operationId: 'listVersions', security: secured, responses: response }, post: { operationId: 'createVersion', security: secured, requestBody: bodySchema(draft), responses: response } },
     '/shortlists/{id}/publish': { parameters: [parameter], post: { operationId: 'publishVersion', security: secured, requestBody: bodySchema({ type: 'object', required: ['version_id', 'expected_current_version_id'], properties: { version_id: { type: 'string' }, expected_current_version_id: { type: ['string', 'null'] }, acknowledge_warnings: { type: 'boolean' }, mail_lease_token: { type: 'string', description: 'Required for uploader publication of a mail-linked version.' } } }), responses: response } },
     '/master': { get: { operationId: 'readPrivateMaster', security: secured, summary: 'Read current master metadata and rows', responses: response } },

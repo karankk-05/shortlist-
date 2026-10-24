@@ -46,6 +46,11 @@ test('non-adjacent company rows are grouped by newest source date with every eve
   assert.equal(result.company_groups[0].added_at, original[2].added_at);
   assert.deepEqual(result.round_categories, ['Test', 'Group Discussion', 'Interview']);
   assert.equal(result.company_groups[0].shortlists.filter(row => row.round_categories.includes('Test')).length, 2);
+  const testStage = result.company_groups[0].rounds.find(stage => stage.round === 'Test');
+  assert.equal(testStage.roles.length, 1);
+  assert.equal(testStage.roles[0].role, 'Hardware');
+  assert.deepEqual(testStage.roles[0].shortlists.map(row => row.id), ['alpha-new', 'alpha-old']);
+  assert.deepEqual(result.company_groups[0].rounds.map(stage => stage.round), ['Test', 'Interview']);
   const grouped = result.company_groups.flatMap(group => group.shortlists);
   assert.equal(grouped.length, original.length);
   for (const row of original) {
@@ -53,6 +58,15 @@ test('non-adjacent company rows are grouped by newest source date with every eve
     assert.deepEqual(source, row, 'Keep exact company, role, round, season and dates');
   }
   assert.deepEqual(rows, original, 'Do not mutate persisted/source records');
+});
+
+test('nested combined rounds appear once and role case aliases stay together', () => {
+  const rows = ['Analyst', '  analyst  '].map((role, index) => ({ id: String(index), company: 'Synthetic', role, round: 'GD / PI', added_at: '2026-10-25T00:00:00Z' }));
+  const result = groupShortlists(rows).company_groups[0];
+  assert.equal(result.rounds.length, 1);
+  assert.equal(result.rounds[0].round, 'Group Discussion + Interview');
+  assert.equal(result.rounds[0].roles.length, 1);
+  assert.equal(result.rounds[0].roles[0].shortlists.length, 2);
 });
 
 test('empty indexes and equal dates produce stable company groups', () => {

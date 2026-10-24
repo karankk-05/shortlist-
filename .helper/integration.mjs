@@ -377,6 +377,11 @@ for (const draft of groupingPublished.slice(0, 5)) {
   const member = companyGroup.shortlists.find(list => list.id === draft.shortlist_id);
   assert.equal(member.company, draft.source.company); assert.equal(member.role, draft.source.role); assert.equal(member.round, draft.source.round); assert.equal(member.added_at, draft.source.date);
 }
+const nestedTests = companyGroup.rounds.find(stage => stage.round === 'Test');
+assert.equal(nestedTests.roles.length, 1);
+assert.equal(nestedTests.roles[0].role, 'Hardware');
+assert.equal(nestedTests.roles[0].shortlists.length, 2);
+assert.deepEqual(groupedIndex.company_groups.flatMap(company => company.rounds.flatMap(stage => stage.roles.flatMap(role => role.shortlists.map(list => list.id)))).sort(), rawIndex.shortlists.map(list => list.id).sort(), 'Every list appears exactly once in company / round / role nesting');
 const otherCompanyGroup = groupedIndex.company_groups.find(group => group.shortlists.some(list => list.id === groupingPublished[5].shortlist_id));
 assert.ok(groupedIndex.company_groups.indexOf(companyGroup) < groupedIndex.company_groups.indexOf(otherCompanyGroup), 'Companies are ordered by their latest Date added');
 const groupedIds = groupedIndex.company_groups.flatMap(group => group.shortlists.map(list => list.id));
@@ -390,9 +395,42 @@ await call('shortlists?include_drafts=1&grouped=1', { expected: 401 });
 const privateGroups = (await call('shortlists?include_drafts=1&grouped=1', { key: true })).result;
 assert.ok(privateGroups.company_groups.some(group => group.shortlists.some(list => list.id === groupingHidden.shortlist_id)), 'Authorized draft index still works');
 
+// Ambiguous identities are published normally, with exactly one count per source entry.
+const ambiguousEntry = { source_name: 'Synthetic source name', source_index: 2, reason: 'Two supported master records; the source has no unique roll.', possible_rolls: rows.map(row => row.roll) };
+const ambiguityInput = { ...input, company: input.company + ' ambiguity', rows: [rows[1]], unresolved_candidates: [ambiguousEntry] };
+await call('shortlists', { method: 'POST', key: true, data: { ...ambiguityInput, unresolved_candidates: [{ ...ambiguousEntry, possible_rolls: ['not-in-master'] }] }, expected: 400 });
+await call('shortlists', { method: 'POST', key: true, data: { ...ambiguityInput, unresolved_candidates: [{ ...ambiguousEntry, possible_matches: rows }] }, expected: 400 });
+const ambiguousDraft = (await call('shortlists', { method: 'POST', key: true, data: ambiguityInput, expected: 201 })).result;
+assert.equal(ambiguousDraft.row_count, 1); assert.equal(ambiguousDraft.unresolved_count, 1); assert.equal(ambiguousDraft.candidate_count, 2);
+await call('shortlists/' + ambiguousDraft.shortlist_id, { expected: 404 });
+await call(`shortlists/${ambiguousDraft.shortlist_id}/publish`, { method: 'POST', key: true, data: { version_id: ambiguousDraft.version_id, expected_current_version_id: null } });
+const ambiguousPublic = (await call('shortlists/' + ambiguousDraft.shortlist_id)).result;
+assert.deepEqual(ambiguousPublic.rows, [rows[1]]);
+assert.equal(ambiguousPublic.unresolved_candidates.length, 1);
+assert.deepEqual(ambiguousPublic.unresolved_candidates[0].possible_matches, rows);
+assert.equal(ambiguousPublic.version.candidate_count, 2, 'Alternatives must not inflate shortlist size');
+const ambiguousCsv = (await call(`shortlists/${ambiguousDraft.shortlist_id}/export.csv`)).result;
+assert.match(ambiguousCsv, /"Synthetic source name","","","","",""/);
+assert.equal(ambiguousCsv.includes('0230001'), false, 'Do not export a possible roll as a confirmed identity');
+const ambiguousIndex = (await call('shortlists?grouped=1')).result.shortlists.find(list => list.id === ambiguousDraft.shortlist_id);
+assert.equal(ambiguousIndex.row_count + ambiguousIndex.unresolved_count, 2);
+const onlyAmbiguous = (await call('shortlists', { method: 'POST', key: true, data: { ...ambiguityInput, company: input.company + ' all ambiguous', rows: [] }, expected: 201 })).result;
+assert.equal(onlyAmbiguous.candidate_count, 1);
+await call(`shortlists/${onlyAmbiguous.shortlist_id}/publish`, { method: 'POST', key: true, data: { version_id: onlyAmbiguous.version_id, expected_current_version_id: null } });
+const originalAmbiguity = structuredClone(ambiguousPublic.unresolved_candidates);
+await call('master', { method: 'PUT', owner: true, data: { name: 'Synthetic changed master', rows: rows.map(row => ({ ...row, cpi: 9 })) }, expected: 201 });
+assert.deepEqual((await call('shortlists/' + ambiguousDraft.shortlist_id)).result.unresolved_candidates, originalAmbiguity, 'Possible details remain a pinned snapshot after a master update');
+const ambiguityMail = (await call('mail/import', { method: 'POST', owner: true, raw: eml.replace('mail-qa@', 'mail-ambiguity@').replace('Synthetic shortlist.', 'Synthetic ambiguous shortlist.'), expected: 201 })).result;
+const ambiguitySource = (await call('mail-jobs/' + ambiguityMail.id, { key: true })).result;
+const ambiguityClaim = (await call(`mail-jobs/${ambiguityMail.id}/claim`, { method: 'POST', key: true, data: {} })).result;
+const ambiguityMailDraft = (await call('shortlists', { method: 'POST', key: true, data: { ...ambiguityInput, company: input.company + ' mail ambiguity', source_upload_ids: ambiguitySource.job.source_upload_ids, mail_job_id: ambiguityMail.id, mail_lease_token: ambiguityClaim.lease_token }, expected: 201 })).result;
+await call(`shortlists/${ambiguityMailDraft.shortlist_id}/publish`, { method: 'POST', key: true, data: { version_id: ambiguityMailDraft.version_id, expected_current_version_id: null, mail_lease_token: ambiguityClaim.lease_token } });
+await call(`mail-jobs/${ambiguityMail.id}/complete`, { method: 'POST', key: true, data: { lease_token: ambiguityClaim.lease_token, note: 'All source candidates published, including one ambiguous identity with alternatives.' } });
+assert.equal((await call('mail-jobs/' + ambiguityMail.id, { key: true })).result.job.status, 'done', 'Name ambiguity does not create a review state');
+
 await call('keys/' + key.id, { method: 'DELETE', owner: true });
 await call('master', { key: true, expected: 401 });
-console.log(JSON.stringify({ passed: true, http_checks: count, all_records_synthetic: true, checked: ['private master', 'anonymous write denial', 'uploader scopes', 'private source files', 'six columns', 'draft privacy', 'publication', 'CSV', 'version conflicts', 'restore', 'owner-only deletion', 'deleted export denial', 'stale deletion rejection', 'deleted shortlist recovery', 'private draft recovery', 'private mail ingestion', 'mail attachment storage', 'duplicate message detection', 'unapproved links', 'exclusive job claims', 'lease expiry and crash recovery', 'mail result publication', 'review and owner retry', 'seven-day completed-only retention', 'shared attachment protection', 'exact shortlist/master byte preservation', 'source deletion audit markers', 'retention idempotency', 'cron handler', 'server-owned company grouping', 'round alias categories', 'unchanged flat API and source event identities', 'grouped draft privacy', 'key revocation', 'CSRF'] }, null, 2));
+console.log(JSON.stringify({ passed: true, http_checks: count, all_records_synthetic: true, checked: ['private master', 'anonymous write denial', 'uploader scopes', 'private source files', 'six columns', 'draft privacy', 'publication', 'CSV', 'version conflicts', 'restore', 'owner-only deletion', 'deleted export denial', 'stale deletion rejection', 'deleted shortlist recovery', 'private draft recovery', 'private mail ingestion', 'mail attachment storage', 'duplicate message detection', 'unapproved links', 'exclusive job claims', 'lease expiry and crash recovery', 'mail result publication', 'review and owner retry', 'seven-day completed-only retention', 'shared attachment protection', 'exact shortlist/master byte preservation', 'source deletion audit markers', 'retention idempotency', 'cron handler', 'server-owned company grouping', 'round alias categories', 'unchanged flat API and source event identities', 'grouped draft privacy', 'company-round-role nesting', 'published ambiguous identities and one-per-source counts', 'pinned alternative details', 'unblocked ambiguous mail completion', 'key revocation', 'CSRF'] }, null, 2));
 
 } finally {
   server.kill('SIGTERM');

@@ -15,8 +15,8 @@ export class InputError extends Error {
   constructor(message: string, status = 400) { super(message); this.status = status; }
 }
 
-export function validateRows(input: unknown): { rows: StudentRow[]; warnings: RowWarning[] } {
-  if (!Array.isArray(input) || !input.length || input.length > 15000) throw new InputError('Provide between 1 and 15,000 student rows.');
+export function validateRows(input: unknown, allowEmpty = false): { rows: StudentRow[]; warnings: RowWarning[] } {
+  if (!Array.isArray(input) || (!input.length && !allowEmpty) || input.length > 15000) throw new InputError('Provide between 1 and 15,000 student rows.');
   const seen = new Set<string>();
   const warnings: RowWarning[] = [];
   const rows = input.map((value, index) => {

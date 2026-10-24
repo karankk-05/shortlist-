@@ -1,9 +1,13 @@
-type GroupableShortlist = { id: string; company: string; round: string; added_at: string };
+type GroupableShortlist = { id: string; company: string; role?: string; round: string; added_at: string };
+type GroupedRow<T> = T & { round_categories: string[] };
+export type RoleGroup<T> = { key: string; role: string; added_at: string; shortlists: GroupedRow<T>[] };
+export type RoundGroup<T> = { key: string; round: string; added_at: string; roles: RoleGroup<T>[] };
 export type CompanyGroup<T extends GroupableShortlist> = {
   key: string;
   company: string;
   added_at: string;
   shortlists: (T & { round_categories: string[] })[];
+  rounds: RoundGroup<T>[];
 };
 
 const categoryOrder = ['Test', 'Group Discussion', 'Interview', 'Buddy Round', 'Case Study', 'Presentation', 'Screening'];
@@ -39,10 +43,19 @@ export function groupShortlists<T extends GroupableShortlist>(rows: readonly T[]
     const key = companyKey(row.company) || `unnamed:${row.id}`;
     let group = groups.get(key);
     if (!group) {
-      group = { key, company: tidy(row.company), added_at: row.added_at, shortlists: [] };
+      group = { key, company: tidy(row.company), added_at: row.added_at, shortlists: [], rounds: [] };
       groups.set(key, group);
     }
-    group.shortlists.push({ ...row, round_categories: roundCategories(row.round) });
+    const categories = roundCategories(row.round), grouped = { ...row, round_categories: categories };
+    group.shortlists.push(grouped);
+    // A combined GD / Interview source appears once, under a combined stage.
+    const round = categories.join(' + '), roundKey = round.toLowerCase();
+    let roundGroup = group.rounds.find(value => value.key === roundKey);
+    if (!roundGroup) { roundGroup = { key: roundKey, round, added_at: row.added_at, roles: [] }; group.rounds.push(roundGroup); }
+    const role = tidy(row.role || '') || 'Unspecified role', roleKey = role.toLowerCase();
+    let roleGroup = roundGroup.roles.find(value => value.key === roleKey);
+    if (!roleGroup) { roleGroup = { key: roleKey, role, added_at: row.added_at, shortlists: [] }; roundGroup.roles.push(roleGroup); }
+    roleGroup.shortlists.push(grouped);
   }
   const company_groups = [...groups.values()].sort((a, b) => Date.parse(b.added_at) - Date.parse(a.added_at) || a.key.localeCompare(b.key));
   const categories = new Set(company_groups.flatMap(group => group.shortlists.flatMap(row => row.round_categories)));
