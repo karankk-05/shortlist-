@@ -12,6 +12,8 @@ name, roll, programme, branch, cpi, email
 
 Rolls remain text; missing CPI stays blank/null, distinct from zero. Candidate order is preserved. Published lists are publicly viewable and downloadable. The master, originals, drafts, keys and processing notes require authentication.
 
+Company shortlist views include search, programme, branch and batch filters, CPI availability and inclusive minimum/maximum CPI filters. Sort any column using its heading or the sort menu. Missing values stay last in both sort directions. **Original shortlist order** and **Reset view** restore the source ordering. These controls affect the displayed view; stored versions and the complete CSV/Excel downloads retain their original order.
+
 ## Hosting options
 
 As checked on 24 October 2026:

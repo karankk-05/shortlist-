@@ -1,8 +1,9 @@
 'use client';
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import { ArrowDownToLine, ArrowLeft, ArrowRight, BookOpen, Check, CheckCircle2, ChevronLeft, ChevronRight, CircleHelp, Clipboard, FileSpreadsheet, Files, FolderOpen, KeyRound, Layers, LoaderCircle, LockKeyhole, LogOut, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Sparkles, Trash2, Upload, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { ArrowDown, ArrowDownToLine, ArrowLeft, ArrowRight, ArrowUp, ArrowUpDown, BookOpen, Check, CheckCircle2, ChevronLeft, ChevronRight, CircleHelp, Clipboard, FileSpreadsheet, Files, FolderOpen, KeyRound, Layers, LoaderCircle, LockKeyhole, LogOut, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Sparkles, Trash2, Upload, X } from 'lucide-react';
 import { COLUMNS, StudentRow, validateRows } from '@/lib/records';
 import { agentGuide } from '@/lib/agent-guide';
+import { EMPTY_STUDENT_FILTERS, cpiRangeError, studentBatch, viewStudents, type StudentFilters, type StudentSort, type SortDirection } from '@/lib/student-view';
 
 type View = 'library' | 'upload' | 'guide' | 'admin';
 type Session = { role: 'public' | 'uploader' | 'admin'; label: string | null; owner_configured: boolean };
@@ -102,11 +103,45 @@ async function exportXlsx(rows: StudentRow[], filename: string) {
   const workbook = xlsx.utils.book_new(); xlsx.utils.book_append_sheet(workbook, sheet, 'Shortlist'); xlsx.writeFileXLSX(workbook, filename.replace(/[^a-zA-Z0-9_-]/g, '_') + '.xlsx');
 }
 
+const studentColumnLabels = { name: 'Name', roll: 'Roll', programme: 'Programme', branch: 'Branch', cpi: 'CPI', email: 'Email' };
 function StudentTable({ rows }: { rows: StudentRow[] }) {
-  const [query, setQuery] = useState(''), [programme, setProgramme] = useState(''), [page, setPage] = useState(0);
-  const filtered = rows.filter(row => (!programme || row.programme === programme) && (!query || [row.name, row.roll, row.branch, row.email].some(value => value.toLowerCase().includes(query.toLowerCase()))));
+  const [filters, setFilters] = useState<StudentFilters>({ ...EMPTY_STUDENT_FILTERS });
+  const [sort, setSort] = useState<StudentSort>('source'), [direction, setDirection] = useState<SortDirection>('asc'), [page, setPage] = useState(0);
+  const options = useMemo(() => ({
+    programmes: [...new Set(rows.map(row => row.programme).filter(Boolean))].sort(),
+    branches: [...new Set(rows.map(row => row.branch).filter(Boolean))].sort(),
+    batches: [...new Set(rows.map(studentBatch).filter(Boolean))].sort(),
+  }), [rows]);
+  const filtered = useMemo(() => viewStudents(rows, filters, sort, direction), [rows, filters, sort, direction]);
+  const rangeError = cpiRangeError(filters);
+  const changed = sort !== 'source' || Object.keys(EMPTY_STUDENT_FILTERS).some(key => filters[key as keyof StudentFilters] !== EMPTY_STUDENT_FILTERS[key as keyof StudentFilters]);
   const pages = Math.max(1, Math.ceil(filtered.length / 50)), current = Math.min(page, pages - 1);
-  return <><div className="toolbar"><label className="search"><Search size={15} /><input aria-label="Search students" placeholder="Search name, roll or branch…" value={query} onChange={e => { setQuery(e.target.value); setPage(0); }} /></label><select aria-label="Filter by programme" value={programme} onChange={e => { setProgramme(e.target.value); setPage(0); }}><option value="">All programmes</option>{[...new Set(rows.map(row => row.programme).filter(Boolean))].sort().map(value => <option key={value}>{value}</option>)}</select></div><div className="table-wrap"><table className="student-table"><thead><tr>{COLUMNS.map(key => <th key={key}>{key === 'cpi' ? 'CPI' : key}</th>)}</tr></thead><tbody>{filtered.slice(current * 50, current * 50 + 50).map(row => <tr key={row.roll}><td>{row.name || <span className="muted">Not supplied</span>}</td><td>{row.roll}</td><td><span className="pill">{row.programme || '—'}</span></td><td>{row.branch || '—'}</td><td>{row.cpi === null ? <span className="muted">—</span> : String(row.cpi)}</td><td>{row.email || '—'}</td></tr>)}{!filtered.length && <tr><td colSpan={6} className="muted">No students match these filters.</td></tr>}</tbody></table></div><div className="panel-footer"><span>{format(filtered.length)} records · Blank CPI means unavailable</span><div className="pagination"><span>{current + 1} / {pages}</span><button aria-label="Previous page" disabled={!current} onClick={() => setPage(current - 1)}><ChevronLeft size={13} /></button><button aria-label="Next page" disabled={current + 1 >= pages} onClick={() => setPage(current + 1)}><ChevronRight size={13} /></button></div></div></>;
+  function changeFilter<K extends keyof StudentFilters>(field: K, value: StudentFilters[K]) { setFilters(previous => ({ ...previous, [field]: value })); setPage(0); }
+  function chooseSort(field: StudentSort, order: SortDirection) { setSort(field); setDirection(order); setPage(0); }
+  function reset() { setFilters({ ...EMPTY_STUDENT_FILTERS }); chooseSort('source', 'asc'); }
+  return <>
+    <div className="toolbar student-tools"><label className="search"><Search size={15} /><input aria-label="Search students" placeholder="Search name, roll, branch or email…" value={filters.query} onChange={e => changeFilter('query', e.target.value)} /></label>
+      <label className="filter-control">Sort by<select aria-label="Sort students" value={sort === 'source' ? 'source' : `${sort}:${direction}`} onChange={e => { const [field, order] = e.target.value.split(':'); chooseSort(field as StudentSort, (order || 'asc') as SortDirection); }}>
+        <option value="source">Original shortlist order</option>
+        {COLUMNS.flatMap(key => (['asc', 'desc'] as const).map(order => <option key={key + order} value={`${key}:${order}`}>{studentColumnLabels[key]}: {key === 'cpi' || key === 'roll' ? order === 'asc' ? 'low to high' : 'high to low' : order === 'asc' ? 'A to Z' : 'Z to A'}</option>))}
+      </select></label>
+    </div>
+    <div className="student-filters">
+      <label className="filter-control">Programme<select aria-label="Filter by programme" value={filters.programme} onChange={e => changeFilter('programme', e.target.value)}><option value="">All programmes</option>{options.programmes.map(value => <option key={value}>{value}</option>)}</select></label>
+      <label className="filter-control branch-filter">Branch<select aria-label="Filter by branch" value={filters.branch} onChange={e => changeFilter('branch', e.target.value)}><option value="">All branches</option>{options.branches.map(value => <option key={value}>{value}</option>)}</select></label>
+      <label className="filter-control">Batch<select aria-label="Filter by batch" value={filters.batch} onChange={e => changeFilter('batch', e.target.value)}><option value="">All batches</option>{options.batches.map(value => <option key={value}>{value}</option>)}</select></label>
+      <label className="filter-control">CPI<select aria-label="Filter by CPI availability" value={filters.cpiStatus} onChange={e => changeFilter('cpiStatus', e.target.value as StudentFilters['cpiStatus'])}><option value="all">All records</option><option value="available">CPI available</option><option value="missing">CPI missing</option></select></label>
+      <label className="filter-control cpi-limit">Min CPI<input aria-label="Minimum CPI" type="number" min="0" max="10" step="0.01" placeholder="0" value={filters.minimumCpi} aria-invalid={!!rangeError} onChange={e => changeFilter('minimumCpi', e.target.value)} /></label>
+      <label className="filter-control cpi-limit">Max CPI<input aria-label="Maximum CPI" type="number" min="0" max="10" step="0.01" placeholder="10" value={filters.maximumCpi} aria-invalid={!!rangeError} onChange={e => changeFilter('maximumCpi', e.target.value)} /></label>
+      <button className="secondary" disabled={!changed} onClick={reset}><RotateCcw size={12} />Reset view</button>
+    </div>
+    {rangeError && <p role="status" className="filter-error">{rangeError}</p>}
+    <div className="table-wrap"><table className="student-table"><thead><tr>{COLUMNS.map(key => <th key={key} aria-sort={sort === key ? direction === 'asc' ? 'ascending' : 'descending' : 'none'}><button className="column-sort" aria-label={'Sort by ' + studentColumnLabels[key]} onClick={() => chooseSort(key, sort === key && direction === 'asc' ? 'desc' : 'asc')}>{studentColumnLabels[key]}{sort === key ? direction === 'asc' ? <ArrowUp size={11} /> : <ArrowDown size={11} /> : <ArrowUpDown size={11} />}</button></th>)}</tr></thead><tbody>
+      {filtered.slice(current * 50, current * 50 + 50).map(row => <tr key={row.roll}><td>{row.name || <span className="muted">Not supplied</span>}</td><td>{row.roll}</td><td><span className="pill">{row.programme || '—'}</span></td><td>{row.branch || '—'}</td><td>{row.cpi === null ? <span className="muted">—</span> : String(row.cpi)}</td><td>{row.email || '—'}</td></tr>)}
+      {!filtered.length && <tr><td colSpan={6} className="muted">{rangeError ? 'Correct the CPI range above.' : 'No students match these filters.'}</td></tr>}
+    </tbody></table></div>
+    <div className="panel-footer"><div><span aria-live="polite">Showing {format(filtered.length)} of {format(rows.length)} records</span><div className="subtle">Filters and sorting affect this view only. Blank CPI means unavailable.</div></div><div className="pagination"><span>{current + 1} / {pages}</span><button aria-label="Previous page" disabled={!current} onClick={() => setPage(current - 1)}><ChevronLeft size={13} /></button><button aria-label="Next page" disabled={current + 1 >= pages} onClick={() => setPage(current + 1)}><ChevronRight size={13} /></button></div></div>
+  </>;
 }
 
 export default function Desk({ initialView }: { initialView: View }) {
