@@ -14,7 +14,7 @@ Rolls remain text; missing CPI stays blank/null, distinct from zero. Candidate o
 
 The public interface contains the company shortlist index and student tables, with an **Owner login** link. Workspace navigation, upload controls, downloads and version management appear only after login. The login uses a plain text **Enter key** field: paste the portal owner key generated during setup and press Enter. Authorized uploader agents can still sign in at `/upload` or `/mail` with their separate uploader key.
 
-CPI cells initially display `...`. Each cell's eye button reveals its value (or `—` when unavailable); clicking again hides it. Reloading or opening another shortlist hides values again. This is a display preference, not an access restriction: the published data and public export API remain accessible.
+CPI cells initially display `...`. One **Show CPI / Hide CPI** eye button above the student table controls every student in that shortlist, including other pages and filtered results. Revealed missing values display `—`. Reloading or opening another shortlist hides values again. This is a display preference, not an access restriction: the published data and public export API remain accessible. The public library keeps its shortlist/entry/latest-addition statistics; company pages show shortlisted students, CPI availability and Date added.
 
 Company shortlist views include search and sorting, with a **Filters** button for programme, branch, batch, CPI availability and inclusive minimum/maximum CPI filters. Sort any column using its heading or the sort menu. Missing values stay last in both sort directions. **Original shortlist order** and **Reset view** restore the source ordering. These controls affect the displayed view; stored versions and the complete CSV/Excel downloads retain their original order.
 
@@ -91,6 +91,8 @@ Sources: [Workers pricing](https://developers.cloudflare.com/workers/platform/pr
 This version uses a static React frontend, a small Worker API and D1 for database records and chunked private files. It needs no R2 subscription, ChatGPT hosting, ChatGPT sign-in, paid domain or AI API key.
 
 Cloudflare Free includes 100,000 Worker requests/day, 5 million D1 rows read/day, 100,000 rows written/day, and **500 MB per D1 database**. All private files and retained versions count toward storage. Static asset requests are free. Stay on Workers Free and avoid paid add-ons. Exhausting D1 Free quotas causes errors instead of automatic paid overages. Platform terms and quotas can change; free hosting is not an uptime guarantee.
+
+There is currently no automatic mail-retention cleanup. Review storage monthly with `npx wrangler d1 info shortlist-db --json`. A future retention policy can archive/remove portal copies of completed or ignored mail bodies and attachments after 30 days, while preserving the student master, published shortlist versions, receipt dates, source metadata and duplicate-detection hashes. Pending, processing and review sources must remain available. Cleanup must handle shared/referenced uploads and mark archived sources explicitly so retries and audit links do not silently break. The collector does not delete messages from the IITK mailbox.
 
 Workers Free has a 10 ms CPU limit per invocation. Spreadsheet parsing runs in the browser and matching runs in the external agent. Large imports or heavy traffic may still hit limits: verify the actual master and sample files on the live deployment. The application's 10 MiB upload cap is not a performance guarantee.
 

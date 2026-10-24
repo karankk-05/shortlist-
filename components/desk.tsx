@@ -108,9 +108,9 @@ const studentColumnLabels = { name: 'Name', roll: 'Roll', programme: 'Programme'
 function StudentTable({ rows }: { rows: StudentRow[] }) {
   const [filters, setFilters] = useState<StudentFilters>({ ...EMPTY_STUDENT_FILTERS });
   const [sort, setSort] = useState<StudentSort>('source'), [direction, setDirection] = useState<SortDirection>('asc'), [page, setPage] = useState(0);
-  const [revealedCpi, setRevealedCpi] = useState<Set<string>>(() => new Set());
+  const [showCpi, setShowCpi] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
-  useEffect(() => { setRevealedCpi(new Set()); }, [rows]);
+  useEffect(() => { setShowCpi(false); }, [rows]);
   const options = useMemo(() => ({
     programmes: [...new Set(rows.map(row => row.programme).filter(Boolean))].sort(),
     branches: [...new Set(rows.map(row => row.branch).filter(Boolean))].sort(),
@@ -123,13 +123,13 @@ function StudentTable({ rows }: { rows: StudentRow[] }) {
   function changeFilter<K extends keyof StudentFilters>(field: K, value: StudentFilters[K]) { setFilters(previous => ({ ...previous, [field]: value })); setPage(0); }
   function chooseSort(field: StudentSort, order: SortDirection) { setSort(field); setDirection(order); setPage(0); }
   function reset() { setFilters({ ...EMPTY_STUDENT_FILTERS }); chooseSort('source', 'asc'); }
-  function toggleCpi(roll: string) { setRevealedCpi(previous => { const next = new Set(previous); if (next.has(roll)) next.delete(roll); else next.add(roll); return next; }); }
   return <>
     <div className="toolbar student-tools"><label className="search"><Search size={15} /><input aria-label="Search students" placeholder="Search name, roll, branch or email…" value={filters.query} onChange={e => changeFilter('query', e.target.value)} /></label>
       <label className="filter-control">Sort by<select aria-label="Sort students" value={sort === 'source' ? 'source' : `${sort}:${direction}`} onChange={e => { const [field, order] = e.target.value.split(':'); chooseSort(field as StudentSort, (order || 'asc') as SortDirection); }}>
         <option value="source">Original shortlist order</option>
         {COLUMNS.flatMap(key => (['asc', 'desc'] as const).map(order => <option key={key + order} value={`${key}:${order}`}>{studentColumnLabels[key]}: {key === 'cpi' || key === 'roll' ? order === 'asc' ? 'low to high' : 'high to low' : order === 'asc' ? 'A to Z' : 'Z to A'}</option>))}
       </select></label>
+      <button className="secondary" aria-label={`${showCpi ? 'Hide' : 'Show'} CPI for all students`} aria-pressed={showCpi} onClick={() => setShowCpi(previous => !previous)}>{showCpi ? <EyeOff size={14} /> : <Eye size={14} />}{showCpi ? 'Hide CPI' : 'Show CPI'}</button>
       <button className="secondary" aria-expanded={filtersOpen} onClick={() => setFiltersOpen(previous => !previous)}><SlidersHorizontal size={13} />Filters{changed && <span className="filter-active" aria-label="View modified" />}</button>
     </div>
     {filtersOpen && <div className="student-filters">
@@ -143,7 +143,7 @@ function StudentTable({ rows }: { rows: StudentRow[] }) {
     </div>}
     {rangeError && <p role="status" className="filter-error">{rangeError}</p>}
     <div className="table-wrap"><table className="student-table"><thead><tr>{COLUMNS.map(key => <th key={key} aria-sort={sort === key ? direction === 'asc' ? 'ascending' : 'descending' : 'none'}><button className="column-sort" aria-label={'Sort by ' + studentColumnLabels[key]} onClick={() => chooseSort(key, sort === key && direction === 'asc' ? 'desc' : 'asc')}>{studentColumnLabels[key]}{sort === key ? direction === 'asc' ? <ArrowUp size={11} /> : <ArrowDown size={11} /> : <ArrowUpDown size={11} />}</button></th>)}</tr></thead><tbody>
-      {filtered.slice(current * 50, current * 50 + 50).map(row => <tr key={row.roll}><td>{row.name || <span className="muted">Not supplied</span>}</td><td>{row.roll}</td><td><span className="pill">{row.programme || '—'}</span></td><td>{row.branch || '—'}</td><td><button className="cpi-toggle" aria-label={`${revealedCpi.has(row.roll) ? 'Hide' : 'Show'} CPI for ${row.name || row.roll} (${row.roll})`} aria-pressed={revealedCpi.has(row.roll)} onClick={() => toggleCpi(row.roll)}><span>{revealedCpi.has(row.roll) ? row.cpi === null ? '—' : String(row.cpi) : '...'}</span>{revealedCpi.has(row.roll) ? <EyeOff size={14} /> : <Eye size={14} />}</button></td><td>{row.email || '—'}</td></tr>)}
+      {filtered.slice(current * 50, current * 50 + 50).map(row => <tr key={row.roll}><td>{row.name || <span className="muted">Not supplied</span>}</td><td>{row.roll}</td><td><span className="pill">{row.programme || '—'}</span></td><td>{row.branch || '—'}</td><td><span className={showCpi ? row.cpi === null ? 'muted' : '' : 'cpi-hidden'}>{showCpi ? row.cpi === null ? '—' : String(row.cpi) : '...'}</span></td><td>{row.email || '—'}</td></tr>)}
       {!filtered.length && <tr><td colSpan={6} className="muted">{rangeError ? 'Correct the CPI range above.' : 'No students match these filters.'}</td></tr>}
     </tbody></table></div>
     <div className="panel-footer"><span aria-live="polite">{format(filtered.length)} of {format(rows.length)} students</span><div className="pagination"><span>{current + 1} / {pages}</span><button aria-label="Previous page" disabled={!current} onClick={() => setPage(current - 1)}><ChevronLeft size={13} /></button><button aria-label="Next page" disabled={current + 1 >= pages} onClick={() => setPage(current + 1)}><ChevronRight size={13} /></button></div></div>
@@ -178,6 +178,11 @@ export default function Desk({ initialView }: { initialView: View }) {
     </header><main className="content">{error && <Alert message={error} />}
       {initialView === 'library' && !detail && <>
         {heading('Company shortlists', '', '', authorised ? <a href="/upload" className="primary"><Upload size={14} />Upload shortlist</a> : undefined)}
+        <section className="stats" aria-label="Library statistics">
+          <div className="stat"><span className="stat-icon"><FolderOpen size={19} /></span><div><div className="stat-number">{loading ? '—' : format(lists.length)}</div><span className="stat-label">Published shortlists</span></div></div>
+          <div className="stat"><span className="stat-icon"><Files size={19} /></span><div><div className="stat-number">{loading ? '—' : format(lists.reduce((sum, list) => sum + (list.row_count || 0), 0))}</div><span className="stat-label">Shortlist entries</span></div></div>
+          <div className="stat"><span className="stat-icon"><CheckCircle2 size={19} /></span><div><div className="stat-number small">{loading ? '—' : lists.length ? date(lists[0].added_at) : '—'}</div><span className="stat-label">Latest addition</span></div></div>
+        </section>
         <section className="panel" aria-label="Company shortlists">
           <div className="toolbar"><label className="search"><Search size={15} /><input aria-label="Search companies" placeholder="Search company or position…" value={query} onChange={e => setQuery(e.target.value)} /></label><select aria-label="Filter by round" value={round} onChange={e => setRound(e.target.value)}><option value="">All rounds</option>{[...new Set(lists.map(list => list.round))].map(value => <option key={value}>{value}</option>)}</select></div>
           {loading ? <div className="loading"><Busy /> Loading shortlists…</div> : lists.length === 0 ? <div className="empty"><h3>No shortlists yet.</h3></div> : <div className="table-wrap"><table><thead><tr><th>Company</th><th>Position</th><th>Round</th><th>Students</th><th>Date added</th><th></th></tr></thead><tbody>
@@ -192,7 +197,11 @@ export default function Desk({ initialView }: { initialView: View }) {
           {session.role === 'admin' && <DeleteShortlist list={detail.shortlist} onError={setError} onDeleted={() => { location.href = '/'; }} />}
           <a className="secondary" href={`/api/v1/shortlists/${detail.shortlist.id}/export.csv`}><ArrowDownToLine size={13} />CSV</a><button className="primary" onClick={() => exportXlsx(detail.rows, detail.shortlist.company + '_shortlist').catch(error => setError(error.message))}><ArrowDownToLine size={13} />Excel</button>
         </div> : undefined)}
-        <div className="shortlist-meta"><span>{format(detail.rows.length)} students</span><span>Date added {date(detail.shortlist.added_at)}</span>{authorised && <span>Version {detail.version.number}</span>}</div>
+        <section className="stats" aria-label="Shortlist statistics">
+          <div className="stat"><div><div className="stat-number">{format(detail.rows.length)}</div><span className="stat-label">Shortlisted students</span></div></div>
+          <div className="stat"><div><div className="stat-number">{format(detail.rows.filter(row => row.cpi !== null).length)}</div><span className="stat-label">CPI available</span></div></div>
+          <div className="stat"><div><div className="stat-number small">{date(detail.shortlist.added_at)}</div><span className="stat-label">Date added{authorised ? ` · Version ${detail.version.number}` : ''}</span></div></div>
+        </section>
         {detail.shortlist.notes && <p className="shortlist-note">{detail.shortlist.notes}</p>}
         <section className="panel" aria-label="Shortlisted students"><StudentTable key={detail.shortlist.id} rows={detail.rows} /></section>
         {session.role === 'admin' && <VersionHistory list={detail.shortlist} onError={setError} />}
