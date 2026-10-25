@@ -47,7 +47,7 @@ try {
   const scheduleBundle = await build({ entryPoints: ['lib/mail-schedule.ts'], bundle: true, write: false, format: 'esm', platform: 'browser', logLevel: 'silent' });
   const scheduler = await import('data:text/javascript;base64,' + Buffer.from(scheduleBundle.outputFiles[0].text).toString('base64'));
   await call('/api/v1/mail/interval', { method: 'PUT', data: { minutes: 15 }, expected: 401 });
-  for (const minutes of [0, 1, 7, 120, '5']) await call('/api/v1/mail/interval', { method: 'PUT', owner: true, data: { minutes }, expected: 400 });
+  for (const minutes of [0, 1, 4, 1441, 7.5, '5']) await call('/api/v1/mail/interval', { method: 'PUT', owner: true, data: { minutes }, expected: 400 });
   await db.prepare("INSERT INTO mail_state (account_id, last_uid) VALUES ('schedule-fixture', 123)").run();
   await call('/api/v1/mail/interval', { method: 'PUT', owner: true, data: { minutes: 10 } });
   assert.equal((await call('/api/v1/mail/status', { owner: true })).value.schedule.interval_minutes, 10);
@@ -61,6 +61,13 @@ try {
   await call('/api/v1/mail/interval', { method: 'PUT', owner: true, data: { minutes: 5 } });
   assert.equal(await scheduler.claimScheduledSync(db, tick + 901000), true);
   assert.equal(await scheduler.claimScheduledSync(db, tick + 1200001), true, 'Cron delivery jitter must not turn a five-minute interval into ten minutes');
+  await call('/api/v1/mail/interval', { method: 'PUT', owner: true, data: { minutes: 7 } });
+  assert.equal((await call('/api/v1/mail/status', { owner: true })).value.schedule.interval_minutes, 7);
+  assert.equal(await scheduler.claimScheduledSync(db, tick + 1560000), false, 'A custom seven-minute interval must not run after six minutes');
+  assert.equal(await scheduler.claimScheduledSync(db, tick + 1620001), true, 'Custom intervals run on minute-aligned due slots without five-minute rounding');
+  await call('/api/v1/mail/interval', { method: 'PUT', owner: true, data: { minutes: 1440 } });
+  assert.equal((await call('/api/v1/mail/status', { owner: true })).value.schedule.interval_minutes, 1440);
+  await call('/api/v1/mail/interval', { method: 'PUT', owner: true, data: { minutes: 5 } });
   await db.prepare("DELETE FROM settings WHERE key = 'mail_sync_last_slot'").run();
   await db.prepare("DELETE FROM mail_state WHERE account_id = 'schedule-fixture'").run();
   await call('/mcp', { method: 'POST', data: { jsonrpc: '2.0', id: 1, method: 'server/discover' }, expected: 401 });

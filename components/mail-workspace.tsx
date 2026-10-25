@@ -8,12 +8,12 @@ export default function MailWorkspace({ admin, request }: { admin: boolean; requ
   const [status, setStatus] = useState<any>(null), [jobs, setJobs] = useState<any[]>([]), [selected, setSelected] = useState<any>(null);
   const [filter, setFilter] = useState('pending'), [busy, setBusy] = useState(''), [error, setError] = useState(''), [message, setMessage] = useState(''), [copied, setCopied] = useState(false);
   const [comments, setComments] = useState<Record<string, string>>({});
-  const [interval, setInterval] = useState(5);
+  const [interval, setInterval] = useState<number | string>(5), [customInterval, setCustomInterval] = useState(false);
   const [config, setConfig] = useState({ enabled: true, folder: 'INBOX', lookback_days: 30, senders: '', link_domains: '' });
   const reload = useCallback(async () => {
     try {
       const [state, queue] = await Promise.all([request('mail/status'), request('mail-jobs?status=' + filter + '&limit=50')]);
-      setStatus(state); setJobs(queue.jobs); setInterval(state.schedule?.interval_minutes ?? 5);
+      setStatus(state); setJobs(queue.jobs); setInterval(state.schedule?.interval_minutes ?? 5); setCustomInterval(!(state.schedule?.choices || [5, 10, 15, 30, 60]).includes(state.schedule?.interval_minutes ?? 5));
       setConfig({ ...state.config, senders: state.config.senders.join('\n'), link_domains: state.config.link_domains.join('\n') });
     } catch (error) { setError((error as Error).message); }
   }, [filter, request]);
@@ -21,7 +21,7 @@ export default function MailWorkspace({ admin, request }: { admin: boolean; requ
   const send = (path: string, data: unknown, method = 'POST') => request(path, { method, body: JSON.stringify(data) });
   async function saveInterval(event: FormEvent) {
     event.preventDefault(); setBusy('interval'); setError(''); setMessage('');
-    try { await send('mail/interval', { minutes: interval }, 'PUT'); setMessage(`Automatic sync set to every ${interval} minutes.`); await reload(); }
+    try { await send('mail/interval', { minutes: Number(interval) }, 'PUT'); setMessage(`Automatic sync set to every ${interval} minutes.`); await reload(); }
     catch (error) { setError((error as Error).message); } finally { setBusy(''); }
   }
   async function sync() {
@@ -50,7 +50,7 @@ export default function MailWorkspace({ admin, request }: { admin: boolean; requ
   const prompt = mailTaskPrompt(location.origin);
   return <>
     {error && <div className="notice error" role="alert">{error}</div>}{message && <div className="notice success" role="status">{message}</div>}
-    {admin && <section className="panel" style={{ marginBottom: 24 }}><div className="panel-top"><h2><RefreshCw size={15} /> Automatic mail sync</h2><span className="pill">{status?.config.enabled === false ? 'Paused' : `Every ${status?.schedule?.interval_minutes ?? 5} minutes`}</span></div><form className="cardbody" onSubmit={saveInterval}><div className="top-actions"><label className="field">Sync interval<select aria-label="Automatic mail sync interval" value={interval} disabled={!!busy || !status} onChange={event => setInterval(Number(event.target.value))}>{(status?.schedule?.choices || [5, 10, 15, 30, 60]).map((minutes: number) => <option value={minutes} key={minutes}>Every {minutes === 60 ? 'hour' : `${minutes} minutes`}</option>)}</select></label><button className="primary" disabled={!!busy || !status || interval === status?.schedule?.interval_minutes}>{busy === 'interval' ? 'Saving…' : 'Save interval'}</button></div><p className="hero-note">Changes apply automatically on the server. Your mailbox scan position is preserved; Sync mailbox still works on demand.</p></form></section>}
+    {admin && <section className="panel" style={{ marginBottom: 24 }}><div className="panel-top"><h2><RefreshCw size={15} /> Automatic mail sync</h2><span className="pill">{status?.config.enabled === false ? 'Paused' : `Every ${status?.schedule?.interval_minutes ?? 5} minutes`}</span></div><form className="cardbody" onSubmit={saveInterval}><div className="top-actions"><label className="field">Sync interval<select aria-label="Automatic mail sync interval" value={customInterval ? 'custom' : String(interval)} disabled={!!busy || !status} onChange={event => { setCustomInterval(event.target.value === 'custom'); if (event.target.value !== 'custom') setInterval(Number(event.target.value)); }}>{(status?.schedule?.choices || [5, 10, 15, 30, 60]).map((minutes: number) => <option value={minutes} key={minutes}>Every {minutes === 60 ? 'hour' : `${minutes} minutes`}</option>)}<option value="custom">Custom…</option></select></label>{customInterval && <label className="field">Minutes<input aria-label="Custom mail sync interval in minutes" type="number" min={status?.schedule?.minimum_minutes ?? 5} max={status?.schedule?.maximum_minutes ?? 1440} step="1" required value={interval} disabled={!!busy || !status} onChange={event => setInterval(event.target.value)} /></label>}<button className="primary" disabled={!!busy || !status || Number(interval) === status?.schedule?.interval_minutes}>{busy === 'interval' ? 'Saving…' : 'Save interval'}</button></div><p className="hero-note">Custom intervals accept 5–1440 whole minutes. Changes apply automatically; your mailbox scan position is preserved.</p></form></section>}
     <div className="grid-two"><section className="panel"><div className="panel-top"><h2><Mail size={15} /> IITK mailbox</h2><span className={'pill ' + (status?.configured ? '' : 'orange')}>{status?.configured ? status.config.enabled ? status.state?.last_success_at ? 'Connected' : 'Ready to test' : 'Paused' : 'Not connected'}</span></div><div className="cardbody">
       <p className="lede">Only the configured account is read. Matches “shortlist”, “shortlists”, “shortlisted”, “short-listed” and “short list” in subjects and bodies. Matching emails, links and attachments stay private until your agent publishes a prepared shortlist.</p>
       <div className="mail-facts"><div><span>Connection</span><strong>{status?.host || 'qasid.iitk.ac.in'} · TLS 993</strong></div>{admin && status?.username && <div><span>Account</span><strong>{status.username}</strong></div>}<div><span>Folder</span><strong>{status?.config.folder || 'INBOX'}</strong></div><div><span>Last successful sync</span><strong>{stamp(status?.state?.last_success_at)}</strong></div></div>

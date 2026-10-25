@@ -9,7 +9,7 @@ import { groupShortlists } from './shortlist-groups';
 import { exportCandidateRows, readShortlistData, sameIdentityReviews, validateIdentityReviews, type ShortlistData } from './identity-review';
 import { COLUMNS, csvRows, InputError, sameShortlistRows, StudentRow, toCSV, validateRows } from './records';
 import { queueStatus } from './queue-runtime';
-import { mailSchedule, validateSyncInterval, SYNC_INTERVALS } from './mail-schedule';
+import { mailSchedule, validateSyncInterval, MIN_SYNC_INTERVAL, MAX_SYNC_INTERVAL } from './mail-schedule';
 
 type Actor = { role: 'admin' | 'uploader'; id: string; label: string };
 type List = { id: string; company: string; role: string; round: string; season: string; notes: string; published_version_id: string | null; created_at: string; updated_at: string };
@@ -227,7 +227,7 @@ export async function handle(request: Request): Promise<Response> {
       await access(request, true);
       if (method === 'GET' && !item) return json({ ...await queueStatus(db()), subscriptions: (await db().prepare('SELECT id, event_name, expires_at, revoked_at, last_notified_at FROM agent_subscriptions ORDER BY created_at DESC LIMIT 20').all()).results, deliveries: (await db().prepare('SELECT id, status, attempts, last_status, last_error, created_at, delivered_at FROM agent_deliveries ORDER BY created_at DESC LIMIT 10').all()).results });
       if (method === 'POST' && item === 'notify') { const { notifyQueue } = await import('./queue-runtime'); return json(await notifyQueue(env)); }
-      if (method === 'POST' && item === 'run') { const { scheduledMail } = await import('./queue-runtime'); await scheduledMail(env, '*/5 * * * *', { force: true }); return json(await queueStatus(db())); }
+      if (method === 'POST' && item === 'run') { const { scheduledMail } = await import('./queue-runtime'); await scheduledMail(env, '* * * * *', { force: true }); return json(await queueStatus(db())); }
       throw new InputError('Automation endpoint not found.', 404);
     }
     if (resource === 'session' && method === 'POST') {
@@ -447,7 +447,7 @@ function openapi(origin: string) {
     '/mail-agent': { get: { operationId: 'mailAgentGuide', summary: 'Public workflow instructions without mailbox data', responses: response } },
     '/mail/status': { get: { operationId: 'mailStatus', summary: 'Private mailbox connection state and configuration; never returns the password', security: secured, responses: response } },
     '/mail/config': { put: { operationId: 'configureMail', summary: 'Owner only: mailbox folder, lookback, sender and link-domain rules', security: ownerOnly, requestBody: bodySchema({ type: 'object', required: ['enabled','folder','lookback_days','senders','link_domains'], properties: { enabled: { type: 'boolean' }, folder: { type: 'string' }, lookback_days: { type: 'integer', minimum: 1, maximum: 365 }, senders: { type: 'array', items: { type: 'string' } }, link_domains: { type: 'array', items: { type: 'string' } } } }), responses: response } },
-    '/mail/interval': { put: { operationId: 'setMailSyncInterval', summary: 'Owner only: change automatic collection interval without resetting the mailbox cursor', security: ownerOnly, requestBody: bodySchema({ type: 'object', required: ['minutes'], properties: { minutes: { type: 'integer', enum: SYNC_INTERVALS } } }), responses: response } },
+    '/mail/interval': { put: { operationId: 'setMailSyncInterval', summary: 'Owner only: change automatic collection interval without resetting the mailbox cursor', security: ownerOnly, requestBody: bodySchema({ type: 'object', required: ['minutes'], properties: { minutes: { type: 'integer', minimum: MIN_SYNC_INTERVAL, maximum: MAX_SYNC_INTERVAL } } }), responses: response } },
     '/mail/sync': { post: { operationId: 'syncMail', summary: 'Owner-only manual collector; the server also syncs at the owner-selected interval (default five minutes)', security: ownerOnly, responses: { ...response, '502': { description: 'IITK IMAP sync failed' }, '503': { description: 'Mail credentials have not been configured' } } } },
     '/mail/cleanup': { post: { operationId: 'cleanupCompletedMail', summary: 'Owner only: run the fixed seven-day completed-mail retention policy; no shortlists are deleted. Also runs hourly on Cloudflare.', security: ownerOnly, requestBody: bodySchema({ type: 'object', additionalProperties: false }), responses: response } },
     '/mail/import': { post: { operationId: 'importOwnMail', summary: 'Owner only: import an owned EML message for testing or manual ingestion', security: ownerOnly, requestBody: { required: true, content: { 'message/rfc822': { schema: { type: 'string', format: 'binary' } } } }, responses: { ...response, '201': { description: 'Queued, duplicate or sender/keyword-filtered message' } } } },
