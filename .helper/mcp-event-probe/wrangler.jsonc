@@ -1,0 +1,12 @@
+{
+  "name": "shortlist-mcp-event-probe",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-05-15",
+  "workers_dev": true,
+  "kv_namespaces": [
+    {
+      "binding": "PROBE",
+      "id": "51dbd548c73549a98efc7703951ae036"
+    }
+  ]
+}

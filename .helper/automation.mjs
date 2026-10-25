@@ -1,0 +1,12 @@
+import { readFileSync } from 'node:fs';
+const action = process.argv[2];
+if (!['status', 'sync', 'notify', 'run'].includes(action)) throw new Error('Use status, sync, notify or run, followed by --credentials-file PATH.');
+const option = process.argv.indexOf('--credentials-file');
+if (option < 0 || !process.argv[option + 1]) throw new Error('Provide a private credentials file containing the existing owner key.');
+const matches = [...new Set(readFileSync(process.argv[option + 1], 'utf8').match(/own_[A-Za-z0-9_-]{43}/g) || [])];
+if (matches.length !== 1) throw new Error('The credentials file must contain exactly one existing owner key.');
+const path = action === 'status' ? 'automation' : action === 'sync' ? 'mail/sync' : 'automation/' + action;
+const response = await fetch('https://shortlist-desk.shortlists.workers.dev/api/v1/' + path, { method: action === 'status' ? 'GET' : 'POST', headers: { Authorization: 'Bearer ' + matches[0], 'Content-Type': 'application/json' }, body: action === 'status' ? undefined : '{}' });
+const value = await response.json();
+console.log(JSON.stringify({ http_status: response.status, ...value }, null, 2));
+if (!response.ok) process.exitCode = 1;

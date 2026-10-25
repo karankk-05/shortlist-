@@ -6,5 +6,8 @@ declare namespace Cloudflare {
     OWNER_ENTRY_PATH?: string;
     MAIL_USERNAME?: string;
     MAIL_PASSWORD?: string;
+    OAUTH_KV: KVNamespace;
+    OAUTH_PROVIDER: import('@cloudflare/workers-oauth-provider').OAuthHelpers;
+    PORTAL_ORIGIN?: string;
   }
 }

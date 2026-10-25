@@ -133,7 +133,8 @@ assert.equal((await call('shortlists?include_drafts=1', { owner: true })).result
 await call('mail/status', { expected: 401 });
 await call('mail-jobs', { expected: 401 });
 assert.equal((await call('mail/status', { key: true })).result.configured, false);
-await call('mail/sync', { method: 'POST', key: true, data: {}, expected: 503 });
+await call('mail/sync', { method: 'POST', key: true, data: {}, expected: 403 });
+await call('mail/sync', { method: 'POST', owner: true, data: {}, expected: 503 });
 const mailConfig = { enabled: true, folder: 'INBOX', lookback_days: 30, senders: [], link_domains: ['iitk.ac.in','docs.google.com'] };
 await call('mail/config', { method: 'PUT', key: true, data: mailConfig, expected: 403 });
 await call('mail/config', { method: 'PUT', owner: true, data: mailConfig });
@@ -457,6 +458,9 @@ await call('keys/' + key.id, { method: 'DELETE', owner: true });
 await call('master', { key: true, expected: 401 });
 console.log(JSON.stringify({ passed: true, http_checks: count, all_records_synthetic: true, checked: ['private master', 'anonymous write denial', 'uploader scopes', 'private source files', 'six columns', 'draft privacy', 'publication', 'CSV', 'version conflicts', 'restore', 'owner-only deletion', 'deleted export denial', 'stale deletion rejection', 'deleted shortlist recovery', 'private draft recovery', 'private mail ingestion', 'mail attachment storage', 'duplicate message detection', 'unapproved links', 'exclusive job claims', 'lease expiry and crash recovery', 'mail result publication', 'review and owner retry', 'seven-day completed-only retention', 'shared attachment protection', 'exact shortlist/master byte preservation', 'source deletion audit markers', 'retention idempotency', 'cron handler', 'server-owned company grouping', 'round alias categories', 'unchanged flat API and source event identities', 'grouped draft privacy', 'company-round-role nesting', 'published ambiguous identities and one-per-source counts', 'pinned alternative details', 'unblocked ambiguous mail completion', 'owner-only retry comments and stale/claimed edit protection', 'key revocation', 'CSRF'] }, null, 2));
 
+} catch (error) {
+  console.error(logs);
+  throw error;
 } finally {
   server.kill('SIGTERM');
   await new Promise(resolve => { if (server.exitCode !== null) resolve(); else { server.once('exit', resolve); setTimeout(() => { server.kill('SIGKILL'); resolve(); }, 3000).unref(); } });

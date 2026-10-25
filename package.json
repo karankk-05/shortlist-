@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test .helper/records.test.mjs .helper/student-view.test.mjs .helper/mail.test.mjs .helper/shortlist-groups.test.mjs .helper/identity-review.test.mjs .helper/library-view.test.mjs",
     "test:integration": "node .helper/integration.mjs",
+    "test:events": "node .helper/events.integration.mjs",
     "db:local": "wrangler d1 migrations apply DB --local",
     "db:remote": "wrangler d1 migrations apply DB --remote",
     "deploy": "npm run build && wrangler deploy",
@@ -22,6 +23,7 @@
     "setup:entry": "node .helper/setup-owner-entry.mjs"
   },
   "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^1.2.4",
     "lucide-react": "^1.31.0",
     "postal-mime": "4.1.4",
     "react": "19.2.6",
@@ -34,6 +36,8 @@
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.2",
+    "esbuild": "^0.27.3",
+    "miniflare": "^4.20260515.0",
     "typescript": "5.9.3",
     "vite": "8.0.13",
     "wrangler": "4.92.0"

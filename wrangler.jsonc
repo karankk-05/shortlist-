@@ -3,9 +3,11 @@
   "name": "shortlist-desk",
   "main": "worker/index.ts",
   "compatibility_date": "2026-05-15",
+  "compatibility_flags": ["global_fetch_strictly_public"],
   "workers_dev": true,
   "triggers": {
     "crons": [
+      "*/10 * * * *",
       "0 * * * *"
     ]
   },
@@ -15,6 +17,9 @@
     "not_found_handling": "single-page-application",
     "run_worker_first": [
       "/api/*",
+      "/mcp*",
+      "/oauth/*",
+      "/.well-known/*",
       "/agent",
       "/mail-agent",
       "/admin",
@@ -22,6 +27,7 @@
       "/gate/*"
     ]
   },
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "490a121f086e4cc0aa67971d80211b8f" }],
   "d1_databases": [
     {
       "binding": "DB",

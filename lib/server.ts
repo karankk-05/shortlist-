@@ -8,6 +8,7 @@ import { cleanupMail, MAIL_RETENTION_DAYS } from './mail-retention';
 import { groupShortlists } from './shortlist-groups';
 import { exportCandidateRows, readShortlistData, sameIdentityReviews, validateIdentityReviews, type ShortlistData } from './identity-review';
 import { COLUMNS, csvRows, InputError, sameShortlistRows, StudentRow, toCSV, validateRows } from './records';
+import { queueStatus } from './queue-runtime';
 
 type Actor = { role: 'admin' | 'uploader'; id: string; label: string };
 type List = { id: string; company: string; role: string; round: string; season: string; notes: string; published_version_id: string | null; created_at: string; updated_at: string };
@@ -31,7 +32,7 @@ async function sha256(value: string) {
 function equal(a: string, b: string) { let diff = a.length ^ b.length; for (let i = 0; i < Math.max(a.length, b.length); i++) diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0); return diff === 0; }
 function bearer(request: Request) { return request.headers.get('Authorization')?.match(/^Bearer\s+(\S+)$/i)?.[1] || ''; }
 function sessionKey(request: Request) { return request.headers.get('Cookie')?.split(';').map(value => value.trim()).find(value => value.startsWith('shortlist_session='))?.slice('shortlist_session='.length) || ''; }
-async function keyActor(token: string): Promise<Actor | null> {
+export async function keyActor(token: string): Promise<Actor | null> {
   if (/^own_[A-Za-z0-9_-]{43}$/.test(token)) {
     if (!env.ADMIN_KEY_SHA256 || !/^[a-f0-9]{64}$/.test(env.ADMIN_KEY_SHA256)) return null;
     return equal(await sha256(token), env.ADMIN_KEY_SHA256) ? { role: 'admin', id: 'owner', label: 'Owner' } : null;
@@ -40,7 +41,7 @@ async function keyActor(token: string): Promise<Actor | null> {
   const key = await db().prepare('SELECT id, label FROM access_keys WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?').bind(await sha256(token), now()).first<{ id: string; label: string }>();
   return key ? { role: 'uploader', id: key.id, label: key.label } : null;
 }
-async function actor(request: Request): Promise<Actor | null> {
+export async function actor(request: Request): Promise<Actor | null> {
   return keyActor(bearer(request) || sessionKey(request));
 }
 async function access(request: Request, admin = false) {
@@ -220,6 +221,14 @@ export async function handle(request: Request): Promise<Response> {
       const user = await actor(request);
       return json({ role: user?.role || 'public', label: user?.label || null, owner_configured: /^[a-f0-9]{64}$/.test(env.ADMIN_KEY_SHA256 || ''), ...(user?.role === 'admin' ? { owner_entry_path: env.OWNER_ENTRY_PATH || null } : {}) });
     }
+    if (resource === 'queue-status' && method === 'GET') { await access(request); return json(await queueStatus(db())); }
+    if (resource === 'automation') {
+      await access(request, true);
+      if (method === 'GET' && !item) return json({ ...await queueStatus(db()), subscriptions: (await db().prepare('SELECT id, event_name, expires_at, revoked_at, last_notified_at FROM agent_subscriptions ORDER BY created_at DESC LIMIT 20').all()).results, deliveries: (await db().prepare('SELECT id, status, attempts, last_status, last_error, created_at, delivered_at FROM agent_deliveries ORDER BY created_at DESC LIMIT 10').all()).results });
+      if (method === 'POST' && item === 'notify') { const { notifyQueue } = await import('./queue-runtime'); return json(await notifyQueue(env)); }
+      if (method === 'POST' && item === 'run') { const { scheduledMail } = await import('./queue-runtime'); await scheduledMail(env, '*/10 * * * *'); return json(await queueStatus(db())); }
+      throw new InputError('Automation endpoint not found.', 404);
+    }
     if (resource === 'session' && method === 'POST') {
       const input = await body(request), token = string(input.key, 'Access key', 100, true); const user = await keyActor(token);
       if (!user) throw new InputError('Invalid, expired or revoked access key.', 401);
@@ -245,7 +254,7 @@ export async function handle(request: Request): Promise<Response> {
         if (Object.keys(await body(request)).length) throw new InputError('Send {}. Cleanup always uses seven days after completion and preserves all shortlists.');
         return json(await cleanupMail(db()));
       }
-      if (method === 'POST' && item === 'sync') { const result = await syncMail(db(), env); await log('mail_synced', user.id, 'mail'); return json(result); }
+      if (method === 'POST' && item === 'sync') { await access(request, true); const result = await syncMail(db(), env); await log('mail_synced', user.id, 'mail'); return json(result); }
       if (method === 'POST' && item === 'import') {
         await access(request, true);
         if (!request.headers.get('Content-Type')?.startsWith('message/rfc822')) throw new InputError('Send an EML message as message/rfc822.');
@@ -430,9 +439,10 @@ function openapi(origin: string) {
     '/mail-agent': { get: { operationId: 'mailAgentGuide', summary: 'Public workflow instructions without mailbox data', responses: response } },
     '/mail/status': { get: { operationId: 'mailStatus', summary: 'Private mailbox connection state and configuration; never returns the password', security: secured, responses: response } },
     '/mail/config': { put: { operationId: 'configureMail', summary: 'Owner only: mailbox folder, lookback, sender and link-domain rules', security: ownerOnly, requestBody: bodySchema({ type: 'object', required: ['enabled','folder','lookback_days','senders','link_domains'], properties: { enabled: { type: 'boolean' }, folder: { type: 'string' }, lookback_days: { type: 'integer', minimum: 1, maximum: 365 }, senders: { type: 'array', items: { type: 'string' } }, link_domains: { type: 'array', items: { type: 'string' } } } }), responses: response } },
-    '/mail/sync': { post: { operationId: 'syncMail', summary: 'Read matching mail into a private queue; repeat while more is true', security: secured, responses: { ...response, '502': { description: 'IITK IMAP sync failed' }, '503': { description: 'Mail credentials have not been configured' } } } },
+    '/mail/sync': { post: { operationId: 'syncMail', summary: 'Owner-only manual collector; the server also syncs automatically every ten minutes', security: ownerOnly, responses: { ...response, '502': { description: 'IITK IMAP sync failed' }, '503': { description: 'Mail credentials have not been configured' } } } },
     '/mail/cleanup': { post: { operationId: 'cleanupCompletedMail', summary: 'Owner only: run the fixed seven-day completed-mail retention policy; no shortlists are deleted. Also runs hourly on Cloudflare.', security: ownerOnly, requestBody: bodySchema({ type: 'object', additionalProperties: false }), responses: response } },
     '/mail/import': { post: { operationId: 'importOwnMail', summary: 'Owner only: import an owned EML message for testing or manual ingestion', security: ownerOnly, requestBody: { required: true, content: { 'message/rfc822': { schema: { type: 'string', format: 'binary' } } } }, responses: { ...response, '201': { description: 'Queued, duplicate or sender/keyword-filtered message' } } } },
+    '/queue-status': { get: { operationId: 'queueStatus', summary: 'Quick actionable queue counts and automatic collector health, without student or message data', security: secured, responses: response } },
     '/mail-jobs': { get: { operationId: 'listMailJobs', summary: 'Private queue, newest received first; pending includes expired job claims', security: secured, parameters: [{ name: 'status', in: 'query', schema: { type: 'string', enum: ['pending','processing','needs_review','done','ignored','all'], default: 'pending' } }, { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 50 } }], responses: response } },
     '/mail-jobs/{id}': { parameters: [parameter], get: { operationId: 'readMailJob', summary: 'Private email text, attachments, links and previously prepared results', security: secured, responses: response } },
     '/mail-jobs/{id}/claim': { parameters: [parameter], post: { operationId: 'claimMailJob', summary: 'Exclusively claim a pending/expired job for two hours; returns lease_token once', security: secured, responses: response } },
