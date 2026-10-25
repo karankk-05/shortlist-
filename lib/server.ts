@@ -6,7 +6,7 @@ import { mailConfig, mailHash, mailLease, mailStatus, saveMail, syncMail } from 
 import { validateMailConfig } from './mail-content';
 import { cleanupMail, MAIL_RETENTION_DAYS } from './mail-retention';
 import { groupShortlists } from './shortlist-groups';
-import { exportCandidateRows, readShortlistData, sameIdentityReviews, validateIdentityReviews, type ShortlistData } from './identity-review';
+import { exportCandidateRows, publicShortlistData, readShortlistData, sameIdentityReviews, validateIdentityReviews, type ShortlistData } from './identity-review';
 import { COLUMNS, csvRows, InputError, sameShortlistRows, StudentRow, toCSV, validateRows } from './records';
 import { queueStatus } from './queue-runtime';
 import { mailSchedule, validateSyncInterval, MIN_SYNC_INTERVAL, MAX_SYNC_INTERVAL } from './mail-schedule';
@@ -421,7 +421,7 @@ export async function handle(request: Request): Promise<Response> {
         if (action === 'export.csv') {
           return plain(toCSV(exportCandidateRows(data)), 'text/csv; charset=utf-8', { 'X-Unresolved-Candidates': String(data.unresolved_candidates.length), 'Content-Disposition': `attachment; filename="${list.company.replace(/[^a-zA-Z0-9_-]/g, '_')}_shortlist.csv"` });
         }
-        return json({ shortlist: list, version: publicVersion(version), columns: COLUMNS, ...data });
+        return json({ shortlist: list, version: publicVersion(version), columns: COLUMNS, ...(await actor(request) ? data : publicShortlistData(data)) });
       }
     }
     throw new InputError('Endpoint not found. See /api/v1/openapi.json.', 404);
@@ -437,7 +437,7 @@ function openapi(origin: string) {
   const ownerOnly = [{ OwnerKey: [] }];
   const student = { type: 'object', additionalProperties: false, required: COLUMNS, properties: Object.fromEntries(COLUMNS.map(key => [key, key === 'cpi' ? { type: ['number', 'null'], minimum: 0, maximum: 10 } : { type: 'string' }])) };
   const response = { '200': { description: 'Success' }, '400': { description: 'Invalid input' }, '401': { description: 'Access key or owner session required' }, '403': { description: 'Owner access required' }, '404': { description: 'Not found or deleted' }, '409': { description: 'Concurrent update or duplicate shortlist' } };
-  const draft = { type: 'object', properties: { company: { type: 'string' }, role: { type: 'string' }, round: { type: 'string' }, season: { type: 'string' }, master_id: { type: 'string' }, rows: { type: 'array', items: student }, unresolved_candidates: { type: 'array', maxItems: 1000, items: { type: 'object', additionalProperties: false, required: ['source_name', 'source_index', 'reason', 'possible_rolls'], properties: { source_name: { type: 'string', maxLength: 240 }, source_index: { type: 'integer', minimum: 1, maximum: 100000 }, reason: { type: 'string', maxLength: 500 }, possible_rolls: { type: 'array', maxItems: 20, uniqueItems: true, items: { type: 'string' }, description: 'Alternative master identifiers only. The server snapshots their six-column details; none is a confirmed shortlisted identity.' } } } }, csv_text: { type: 'string' }, processing_notes: { type: 'string' }, source_upload_ids: { type: 'array', items: { type: 'string' } }, expected_latest_version_id: { type: ['string', 'null'] }, mail_job_id: { type: 'string' }, mail_lease_token: { type: 'string' } }, required: ['master_id'] };
+  const draft = { type: 'object', properties: { company: { type: 'string' }, role: { type: 'string' }, round: { type: 'string' }, season: { type: 'string' }, master_id: { type: 'string' }, rows: { type: 'array', items: student }, unresolved_candidates: { type: 'array', maxItems: 1000, items: { type: 'object', additionalProperties: false, required: ['source_name', 'source_index', 'reason', 'possible_rolls'], properties: { source_name: { type: 'string', maxLength: 240 }, source_index: { type: 'integer', minimum: 1, maximum: 100000 }, reason: { type: 'string', maxLength: 500, description: 'Private reconciliation reason; omitted from anonymous responses and public pages.' }, possible_rolls: { type: 'array', maxItems: 20, uniqueItems: true, items: { type: 'string' }, description: 'Alternative master identifiers only. The server snapshots their six-column details; none is a confirmed shortlisted identity.' } } } }, csv_text: { type: 'string' }, processing_notes: { type: 'string' }, source_upload_ids: { type: 'array', items: { type: 'string' } }, expected_latest_version_id: { type: ['string', 'null'] }, mail_job_id: { type: 'string' }, mail_lease_token: { type: 'string' } }, required: ['master_id'] };
   const bodySchema = (schema: unknown) => ({ required: true, content: { 'application/json': { schema } } });
   const parameter = { name: 'id', in: 'path', required: true, schema: { type: 'string' } };
   const deleteBody = bodySchema({ type: 'object', required: ['expected_updated_at'], properties: { expected_updated_at: { type: 'string', description: 'updated_at from the latest shortlist metadata, to reject stale changes.' } } });

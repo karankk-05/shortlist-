@@ -7,6 +7,8 @@ export type IdentityReview = {
   possible_matches: StudentRow[];
 };
 export type ShortlistData = { rows: StudentRow[]; unresolved_candidates: IdentityReview[] };
+export type PublicIdentityReview = Pick<IdentityReview, 'source_name' | 'possible_matches'>;
+export type PublicShortlistData = { rows: StudentRow[]; unresolved_candidates: PublicIdentityReview[] };
 
 function text(value: unknown, label: string, maximum: number) {
   if (typeof value !== 'string' || !value.trim() || value.length > maximum || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value)) throw new InputError(`Invalid ${label}.`);
@@ -43,8 +45,13 @@ export function readShortlistData(value: StudentRow[] | ShortlistData): Shortlis
   return Array.isArray(value) ? { rows: value, unresolved_candidates: [] } : value;
 }
 
+/** Source positions and reconciliation reasons are private, including for old snapshots. */
+export function publicShortlistData(data: ShortlistData): PublicShortlistData {
+  return { rows: data.rows, unresolved_candidates: data.unresolved_candidates.map(({ source_name, possible_matches }) => ({ source_name, possible_matches })) };
+}
+
 /** Flat six-column exports preserve one source candidate, without asserting an alternative. */
-export function exportCandidateRows(data: ShortlistData): StudentRow[] {
+export function exportCandidateRows(data: PublicShortlistData): StudentRow[] {
   return [...data.rows, ...data.unresolved_candidates.map(entry => ({ name: entry.source_name, roll: '', programme: '', branch: '', cpi: null, email: '' }))];
 }
 

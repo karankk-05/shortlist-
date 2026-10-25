@@ -6,7 +6,7 @@ import { agentGuide } from '@/lib/agent-guide';
 import MailWorkspace from './mail-workspace';
 import { EMPTY_STUDENT_FILTERS, cpiRangeError, studentBatch, viewStudents, type StudentFilters, type StudentSort, type SortDirection } from '@/lib/student-view';
 import type { CompanyGroup } from '@/lib/shortlist-groups';
-import { exportCandidateRows, type IdentityReview } from '@/lib/identity-review';
+import { exportCandidateRows, type IdentityReview, type PublicIdentityReview } from '@/lib/identity-review';
 import ShortlistLibrary from './shortlist-library';
 import ThemeToggle from './theme-toggle';
 import Collapsible from './collapsible';
@@ -19,7 +19,7 @@ type Master = { id: string; name: string; row_count: number; cpi_count: number; 
 type Version = { id: string; number: number; row_count: number; unresolved_count: number; published_at: string | null; processing_notes: string; warnings: { row: number; roll: string; issues: string[] }[]; created_at: string };
 type Draft = { shortlist_id: string; version_id: string; row_count: number; number: number; warnings: { row: number; roll: string; issues: string[] }[]; expected_current_version_id: string | null; public_url: string };
 type StoredFile = { id: string; filename: string; size: number; created_at: string };
-type ShortlistDetail = { shortlist: Listing; rows: StudentRow[]; unresolved_candidates: IdentityReview[]; version: Version };
+type ShortlistDetail = { shortlist: Listing; rows: StudentRow[]; unresolved_candidates: PublicIdentityReview[]; version: Version };
 const labels: Record<View, string> = { library: 'Shortlists', upload: 'Upload workspace', guide: 'Agent workflow', admin: 'Owner settings', mail: 'Mail workflow' };
 async function api<T = any>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch('/api/v1/' + path, { cache: 'no-store', credentials: 'same-origin', ...options, headers: { ...(options?.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }), ...options?.headers } });
@@ -112,7 +112,7 @@ async function exportXlsx(rows: StudentRow[], filename: string) {
 }
 
 const studentColumnLabels = { name: 'Name', roll: 'Roll', programme: 'Programme', branch: 'Branch', cpi: 'CPI', email: 'Email' };
-function StudentTable({ rows, unresolved = [] }: { rows: StudentRow[]; unresolved?: IdentityReview[] }) {
+function StudentTable({ rows, unresolved = [] }: { rows: StudentRow[]; unresolved?: PublicIdentityReview[] }) {
   const [filters, setFilters] = useState<StudentFilters>({ ...EMPTY_STUDENT_FILTERS });
   const [sort, setSort] = useState<StudentSort>('source'), [direction, setDirection] = useState<SortDirection>('asc'), [page, setPage] = useState(0);
   const [showCpi, setShowCpi] = useState(false);
@@ -154,15 +154,13 @@ function StudentTable({ rows, unresolved = [] }: { rows: StudentRow[]; unresolve
       {!filtered.length && <tr><td colSpan={6} className="muted">{rangeError ? 'Correct the CPI range above.' : 'No students match these filters.'}</td></tr>}
     </tbody></table></div>
     <div className="panel-footer"><span aria-live="polite">{format(filtered.length)} of {format(rows.length)} {unresolved.length ? `confirmed identities · ${unresolved.length} ambiguous · ${rows.length + unresolved.length} total students` : "students"}</span><div className="pagination"><span>{current + 1} / {pages}</span><button aria-label="Previous page" disabled={!current} onClick={() => setPage(current - 1)}><ChevronLeft size={13} /></button><button aria-label="Next page" disabled={current + 1 >= pages} onClick={() => setPage(current + 1)}><ChevronRight size={13} /></button></div></div>
-    {!!unresolved.length && <section className="identity-review" aria-label="Ambiguous candidate identities">
-      <h2>Ambiguous candidates <span className="badge">{unresolved.length}</span></h2>
-      <p>Each entry below represents one candidate from the source. Possible matches are alternatives, not confirmed shortlisted students. These entries stay visible regardless of the table filters.</p>
-      {unresolved.map(entry => <article className="identity-entry" key={entry.source_index}>
-        <h3>{entry.source_name} <span className="pill orange">{entry.possible_matches.length > 1 ? 'Possible identities' : 'Identity not confirmed'}</span></h3>
-        <p className="subtle">Source candidate #{entry.source_index} · {entry.reason}</p>
-        {entry.possible_matches.length ? <><p className="review-alternatives">Could be one of the following — identity has not been confirmed:</p><div className="table-wrap"><table className="review-options"><thead><tr>{COLUMNS.map(key => <th key={key}>{studentColumnLabels[key]}</th>)}</tr></thead><tbody>
+    {!!unresolved.length && <section className="identity-review" aria-label="Possible candidates">
+      <h2>Possible candidates <span className="badge">{unresolved.length}</span></h2>
+      {unresolved.map((entry, index) => <article className="identity-entry" key={`${index}-${entry.source_name}`}>
+        <h3>{entry.source_name}</h3>
+        {entry.possible_matches.length ? <><p className="review-alternatives">Could be one of the following:</p><div className="table-wrap"><table className="review-options"><thead><tr>{COLUMNS.map(key => <th key={key}>{studentColumnLabels[key]}</th>)}</tr></thead><tbody>
           {entry.possible_matches.map(match => <tr key={match.roll}><td>{match.name || '—'}</td><td>{match.roll}</td><td>{match.programme || '—'}</td><td>{match.branch || '—'}</td><td><span className={showCpi ? '' : 'cpi-hidden'}>{showCpi ? match.cpi === null ? '—' : match.cpi : '...'}</span></td><td>{match.email || '—'}</td></tr>)}
-        </tbody></table></div></> : <p className="muted">No supported master match yet. The original candidate is retained for review.</p>}
+        </tbody></table></div></> : <p className="muted">Possible candidates pending.</p>}
       </article>)}
     </section>}
   </>;

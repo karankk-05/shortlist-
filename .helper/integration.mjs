@@ -434,6 +434,11 @@ const ambiguousPublic = (await call('shortlists/' + ambiguousDraft.shortlist_id)
 assert.deepEqual(ambiguousPublic.rows, [rows[1]]);
 assert.equal(ambiguousPublic.unresolved_candidates.length, 1);
 assert.deepEqual(ambiguousPublic.unresolved_candidates[0].possible_matches, rows);
+assert.deepEqual(Object.keys(ambiguousPublic.unresolved_candidates[0]).sort(), ['possible_matches', 'source_name'], 'Anonymous readers receive possible candidates without private source positions or reasons');
+const ambiguousPrivate = (await call('shortlists/' + ambiguousDraft.shortlist_id, { key: true })).result;
+assert.equal(ambiguousPrivate.unresolved_candidates[0].reason, ambiguousEntry.reason, 'The agent retains private reconciliation reasons');
+assert.equal(ambiguousPrivate.unresolved_candidates[0].source_index, ambiguousEntry.source_index);
+assert.equal((await call('shortlists/' + ambiguousDraft.shortlist_id, { owner: true })).result.unresolved_candidates[0].reason, ambiguousEntry.reason, 'The owner retains private reconciliation reasons');
 assert.equal(ambiguousPublic.version.candidate_count, 2, 'Alternatives must not inflate shortlist size');
 const ambiguousCsv = (await call(`shortlists/${ambiguousDraft.shortlist_id}/export.csv`)).result;
 assert.match(ambiguousCsv, /"Synthetic source name","","","","",""/);
