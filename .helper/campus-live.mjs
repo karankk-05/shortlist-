@@ -32,5 +32,7 @@ for (const [path, expected] of checks) {
 }
 const spoofed = await read('/api/v1/shortlists', { 'CF-Connecting-IP': '14.139.38.102', 'X-Forwarded-For': '14.139.38.102', 'X-Real-IP': '14.139.38.102' });
 assert.equal(spoofed.status, 403);
-assert.equal((await spoofed.json()).code, 'iitk_network_required');
+// Cloudflare can reject forged edge headers before the request reaches our Worker.
+if (spoofed.headers.get('Content-Type')?.includes('application/json')) assert.equal((await spoofed.json()).code, 'iitk_network_required');
+else await spoofed.body?.cancel();
 console.log(JSON.stringify({ passed: true, outside_campus_denied: true, forged_campus_headers_denied: true, oauth_and_login_available: true, student_data_read: false }));
