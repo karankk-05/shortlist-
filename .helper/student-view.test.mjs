@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EMPTY_STUDENT_FILTERS, viewStudents, cpiRangeError, studentBatch } from '../lib/student-view.ts';
+import { EMPTY_STUDENT_FILTERS, searchPossibleCandidates, viewStudents, cpiRangeError, studentBatch } from '../lib/student-view.ts';
 
 const base = { programme: 'BTech', branch: 'Test engineering', email: 'synthetic@example.invalid' };
 const rows = [
@@ -39,4 +39,24 @@ test('keeps ties stable and restores source order without mutating the stored sh
   assert.deepEqual(rows, before);
   assert.equal(studentBatch(rows[0]), 'Y24');
   assert.equal(studentBatch({ ...rows[0], roll: 'external-2' }), '');
+});
+const possible = [
+  { source_name: 'Dharmesh', possible_matches: [{ ...rows[0], name: 'Dharmesh Example', roll: '230010' }, { ...rows[1], name: 'Dharmesh Second', roll: '230011' }] },
+  { source_name: 'Another source name', possible_matches: [{ ...rows[2], name: 'Different Example', email: 'alternative@example.invalid' }] },
+  { source_name: 'Pending example', possible_matches: [] },
+];
+test('searches individual ambiguities and retains all alternatives for the matching source candidate', () => {
+  const before = structuredClone(possible);
+  assert.deepEqual(searchPossibleCandidates(possible, '  DHARMESH '), [possible[0]]);
+  assert.deepEqual(searchPossibleCandidates(possible, '230011'), [possible[0]], 'An alternative roll locates its ambiguity while retaining both possible identities');
+  assert.deepEqual(searchPossibleCandidates(possible, 'ALTERNATIVE@EXAMPLE'), [possible[1]]);
+  assert.deepEqual(searchPossibleCandidates(possible, 'Different Example'), [possible[1]], 'An alternative name can differ from the source label');
+  assert.deepEqual(possible, before);
+});
+test('ambiguity search handles source-only entries, no matches, whitespace and shared student fields', () => {
+  assert.deepEqual(searchPossibleCandidates(possible, 'Pending'), [possible[2]]);
+  assert.deepEqual(searchPossibleCandidates(possible, 'not-a-student'), []);
+  assert.deepEqual(searchPossibleCandidates(possible, '   '), possible);
+  assert.deepEqual(searchPossibleCandidates(possible, 'Test engineering'), possible.slice(0, 2));
+  assert.deepEqual(searchPossibleCandidates([], 'Dharmesh'), []);
 });

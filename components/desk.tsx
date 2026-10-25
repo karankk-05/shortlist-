@@ -4,7 +4,7 @@ import { ArrowDown, ArrowDownToLine, ArrowLeft, ArrowRight, ArrowUp, ArrowUpDown
 import { COLUMNS, StudentRow, validateRows } from '@/lib/records';
 import { agentGuide } from '@/lib/agent-guide';
 import MailWorkspace from './mail-workspace';
-import { EMPTY_STUDENT_FILTERS, cpiRangeError, studentBatch, viewStudents, type StudentFilters, type StudentSort, type SortDirection } from '@/lib/student-view';
+import { EMPTY_STUDENT_FILTERS, cpiRangeError, searchPossibleCandidates, studentBatch, viewStudents, type StudentFilters, type StudentSort, type SortDirection } from '@/lib/student-view';
 import type { CompanyGroup } from '@/lib/shortlist-groups';
 import { exportCandidateRows, type IdentityReview, type PublicIdentityReview } from '@/lib/identity-review';
 import ShortlistLibrary from './shortlist-library';
@@ -124,6 +124,7 @@ function StudentTable({ rows, unresolved = [] }: { rows: StudentRow[]; unresolve
     batches: [...new Set(rows.map(studentBatch).filter(Boolean))].sort(),
   }), [rows]);
   const filtered = useMemo(() => viewStudents(rows, filters, sort, direction), [rows, filters, sort, direction]);
+  const matchingUnresolved = useMemo(() => searchPossibleCandidates(unresolved, filters.query), [unresolved, filters.query]);
   const rangeError = cpiRangeError(filters);
   const changed = sort !== 'source' || Object.keys(EMPTY_STUDENT_FILTERS).some(key => filters[key as keyof StudentFilters] !== EMPTY_STUDENT_FILTERS[key as keyof StudentFilters]);
   const pages = Math.max(1, Math.ceil(filtered.length / 50)), current = Math.min(page, pages - 1);
@@ -151,12 +152,12 @@ function StudentTable({ rows, unresolved = [] }: { rows: StudentRow[]; unresolve
     {rangeError && <p role="status" className="filter-error">{rangeError}</p>}
     <div className="table-wrap"><table className="student-table"><thead><tr>{COLUMNS.map(key => <th key={key} aria-sort={sort === key ? direction === 'asc' ? 'ascending' : 'descending' : 'none'}><button className="column-sort" aria-label={'Sort by ' + studentColumnLabels[key]} onClick={() => chooseSort(key, sort === key && direction === 'asc' ? 'desc' : 'asc')}>{studentColumnLabels[key]}{sort === key ? direction === 'asc' ? <ArrowUp size={11} /> : <ArrowDown size={11} /> : <ArrowUpDown size={11} />}</button></th>)}</tr></thead><tbody>
       {filtered.slice(current * 50, current * 50 + 50).map(row => <tr key={row.roll}><td>{row.name || <span className="muted">Not supplied</span>}</td><td>{row.roll}</td><td><span className="pill">{row.programme || '—'}</span></td><td>{row.branch || '—'}</td><td><span className={showCpi ? row.cpi === null ? 'muted' : '' : 'cpi-hidden'}>{showCpi ? row.cpi === null ? '—' : String(row.cpi) : '...'}</span></td><td>{row.email || '—'}</td></tr>)}
-      {!filtered.length && <tr><td colSpan={6} className="muted">{rangeError ? 'Correct the CPI range above.' : 'No students match these filters.'}</td></tr>}
+      {!filtered.length && <tr><td colSpan={6} className="muted">{rangeError ? 'Correct the CPI range above.' : matchingUnresolved.length ? 'See matching possible candidates below.' : 'No students match these filters.'}</td></tr>}
     </tbody></table></div>
-    <div className="panel-footer"><span aria-live="polite">{format(filtered.length)} of {format(rows.length)} {unresolved.length ? `confirmed identities · ${unresolved.length} ambiguous · ${rows.length + unresolved.length} total students` : "students"}</span><div className="pagination"><span>{current + 1} / {pages}</span><button aria-label="Previous page" disabled={!current} onClick={() => setPage(current - 1)}><ChevronLeft size={13} /></button><button aria-label="Next page" disabled={current + 1 >= pages} onClick={() => setPage(current + 1)}><ChevronRight size={13} /></button></div></div>
-    {!!unresolved.length && <section className="identity-review" aria-label="Possible candidates">
-      <h2>Possible candidates <span className="badge">{unresolved.length}</span></h2>
-      {unresolved.map((entry, index) => <article className="identity-entry" key={`${index}-${entry.source_name}`}>
+    <div className="panel-footer"><span aria-live="polite">{format(filtered.length)} of {format(rows.length)} {unresolved.length ? `confirmed identities · ${filters.query.trim() ? `${matchingUnresolved.length} of ${unresolved.length}` : unresolved.length} ambiguous · ${rows.length + unresolved.length} total students` : "students"}</span><div className="pagination"><span>{current + 1} / {pages}</span><button aria-label="Previous page" disabled={!current} onClick={() => setPage(current - 1)}><ChevronLeft size={13} /></button><button aria-label="Next page" disabled={current + 1 >= pages} onClick={() => setPage(current + 1)}><ChevronRight size={13} /></button></div></div>
+    {!!matchingUnresolved.length && <section className="identity-review" aria-label="Possible candidates">
+      <h2>Possible candidates <span className="badge">{matchingUnresolved.length}</span></h2>
+      {matchingUnresolved.map((entry, index) => <article className="identity-entry" key={`${index}-${entry.source_name}`}>
         <h3>{entry.source_name}</h3>
         {entry.possible_matches.length ? <><p className="review-alternatives">Could be one of the following:</p><div className="table-wrap"><table className="review-options"><thead><tr>{COLUMNS.map(key => <th key={key}>{studentColumnLabels[key]}</th>)}</tr></thead><tbody>
           {entry.possible_matches.map(match => <tr key={match.roll}><td>{match.name || '—'}</td><td>{match.roll}</td><td>{match.programme || '—'}</td><td>{match.branch || '—'}</td><td><span className={showCpi ? '' : 'cpi-hidden'}>{showCpi ? match.cpi === null ? '—' : match.cpi : '...'}</span></td><td>{match.email || '—'}</td></tr>)}

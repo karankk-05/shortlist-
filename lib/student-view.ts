@@ -1,4 +1,5 @@
 import type { StudentRow } from './records';
+import type { PublicIdentityReview } from './identity-review';
 
 export type StudentFilters = {
   query: string; programme: string; branch: string; batch: string;
@@ -10,6 +11,14 @@ export const EMPTY_STUDENT_FILTERS: StudentFilters = {
   query: '', programme: '', branch: '', batch: '', cpiStatus: 'all', minimumCpi: '', maximumCpi: '',
 };
 const collator = new Intl.Collator('en-IN', { numeric: true, sensitivity: 'base' });
+const searchQuery = (value: string) => value.trim().toLocaleLowerCase('en-IN');
+const matchesStudentQuery = (row: StudentRow, query: string) => [row.name, row.roll, row.programme, row.branch, row.email].some(value => value.toLocaleLowerCase('en-IN').includes(query));
+
+/** Search individual source candidates while preserving all alternatives for a matched entry. */
+export function searchPossibleCandidates(entries: readonly PublicIdentityReview[], search: string): PublicIdentityReview[] {
+  const query = searchQuery(search);
+  return entries.filter(entry => !query || entry.source_name.toLocaleLowerCase('en-IN').includes(query) || entry.possible_matches.some(row => matchesStudentQuery(row, query)));
+}
 
 export function studentBatch(row: StudentRow): string {
   const match = row.roll.match(/^(\d{2})\d{4,7}$/);
@@ -26,14 +35,14 @@ export function cpiRangeError(filters: StudentFilters): string {
 
 export function viewStudents(rows: readonly StudentRow[], filters: StudentFilters, sort: StudentSort = 'source', direction: SortDirection = 'asc'): StudentRow[] {
   if (cpiRangeError(filters)) return [];
-  const query = filters.query.trim().toLocaleLowerCase('en-IN');
+  const query = searchQuery(filters.query);
   const minimum = filters.minimumCpi === '' ? null : Number(filters.minimumCpi);
   const maximum = filters.maximumCpi === '' ? null : Number(filters.maximumCpi);
   const filtered = rows.filter(row =>
     (!filters.programme || row.programme === filters.programme) &&
     (!filters.branch || row.branch === filters.branch) &&
     (!filters.batch || studentBatch(row) === filters.batch) &&
-    (!query || [row.name, row.roll, row.programme, row.branch, row.email].some(value => value.toLocaleLowerCase('en-IN').includes(query))) &&
+    (!query || matchesStudentQuery(row, query)) &&
     (filters.cpiStatus !== 'available' || row.cpi !== null) &&
     (filters.cpiStatus !== 'missing' || row.cpi === null) &&
     (minimum === null || (row.cpi !== null && row.cpi >= minimum)) &&
