@@ -83,6 +83,8 @@ try {
   const consent = await call('/oauth/authorize?' + authParams);
   assert.match(consent.value, /Connect Shortlist Desk to ChatGPT/);
   assert.equal(consent.response.headers.get('Referrer-Policy'), 'same-origin', 'The form must preserve a non-null Origin header on browser navigation POSTs');
+  assert.match(consent.response.headers.get('Content-Security-Policy'), /(?:^|;)\s*form-action 'self' https:\/\/chatgpt\.com;/, 'Chrome must allow the validated ChatGPT callback after the form POST');
+  if (process.env.CHROME_BIN) await (await import('./oauth-redirect.browser.mjs')).verifyConsentRedirectInChrome(consent.response.headers.get('Content-Security-Policy'));
   assert.match(consent.value, /Return address: <strong>chatgpt.com<\/strong>/);
   const handle = consent.value.match(/name="handle" value="([^"]+)"/)[1];
   const cookie = consent.response.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
@@ -90,6 +92,8 @@ try {
   await call('/oauth/authorize', { method: 'POST', cookie, originHeader: 'null', form: new URLSearchParams({ decision: 'allow', handle, owner_key: ownerKey }), expected: 403 });
   await call('/oauth/authorize', { method: 'POST', cookie, originHeader: 'https://untrusted.invalid', form: new URLSearchParams({ decision: 'allow', handle, owner_key: ownerKey }), expected: 403 });
   const authorized = await call('/oauth/authorize', { method: 'POST', cookie, form: new URLSearchParams({ decision: 'allow', handle, owner_key: ownerKey }), expected: 303 });
+  const repeatedConsent = await call('/oauth/authorize', { method: 'POST', cookie, form: new URLSearchParams({ decision: 'allow', handle, owner_key: ownerKey }), expected: 400 });
+  assert.match(repeatedConsent.value, /expired or was already used/, 'A second click explains that the consent form has already been used');
   const redirect = new URL(authorized.response.headers.get('Location'));
   assert.equal(redirect.origin, 'https://chatgpt.com');
   assert.equal(redirect.searchParams.get('state'), 'synthetic-state');

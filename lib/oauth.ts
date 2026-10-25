@@ -1,4 +1,4 @@
-import { OAuthProvider, getOAuthApi, OAuthError, type OAuthHelpers } from '@cloudflare/workers-oauth-provider';
+import { OAuthProvider, getOAuthApi, OAuthError, AuthorizationError, CimdFetchError, type OAuthHelpers } from '@cloudflare/workers-oauth-provider';
 import { actor, keyActor } from './server';
 import { mailHash } from './mail-service';
 import { mcpHandler } from './mcp';
@@ -31,7 +31,10 @@ export function oauthProvider(env: Cloudflare.Env, defaultHandler: ExportedHandl
 
 export async function authorizeAgent(request: Request, env: Cloudflare.Env): Promise<Response> {
   const api = oauthHelpers(env);
-  const secureHeaders = new Headers({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'same-origin', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'" });
+  // Chrome also checks form-action on the redirect after POST. Allow the callback
+  // origin as well as our form endpoint; the OAuth provider validates its exact URI.
+  const secureHeaders = new Headers({ 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Referrer-Policy': 'same-origin', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://chatgpt.com; frame-ancestors 'none'; base-uri 'none'" });
+  let stage = 'request';
   try {
     if (request.method === 'GET') {
       const auth = await api.parseAuthRequest(request);
@@ -50,12 +53,21 @@ export async function authorizeAgent(request: Request, env: Cloudflare.Env): Pro
     const ownerKey = form.get('owner_key');
     const owner = typeof ownerKey === 'string' && ownerKey ? await keyActor(ownerKey) : await actor(request);
     if (owner?.role !== 'admin') return new Response('Invalid owner key. Return to ChatGPT and reconnect.', { status: 401, headers: secureHeaders });
+    stage = 'consent';
     const approval = await api.approveConsent(request, handle);
+    stage = 'credential';
     const key = 'upl_' + btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
     const keyId = crypto.randomUUID(), time = new Date().toISOString();
     await env.DB.prepare('INSERT INTO access_keys (id, token_hash, label, created_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, NULL)').bind(keyId, await mailHash(key), 'ChatGPT event workflow', time, new Date(Date.now() + 60 * 86400000).toISOString()).run();
+    stage = 'grant';
     const result = await api.completeAuthorization({ request: approval.request, userId: 'owner', metadata: { label: 'Shortlist Desk event workflow', key_id: keyId }, scope: approval.request.scope, props: { userId: 'owner', key, keyId }, revokeExistingGrants: true });
     const headers = new Headers(approval.headers); headers.set('Location', result.redirectTo); headers.set('Cache-Control', 'no-store'); headers.set('Referrer-Policy', 'no-referrer');
     return new Response(null, { status: 303, headers });
-  } catch { return new Response('The connection request is invalid or expired. Return to ChatGPT and reconnect.', { status: 400, headers: secureHeaders }); }
+  } catch (error) {
+    if (error instanceof AuthorizationError) return new Response(`${escape(error.description || 'The connection request is invalid or expired.')} Return to ChatGPT and start a new connection.`, { status: 400, headers: secureHeaders });
+    if (error instanceof CimdFetchError) return new Response('ChatGPT client verification is temporarily unavailable. Return to ChatGPT and try connecting again.', { status: 503, headers: secureHeaders });
+    // Log only the failing stage, never submitted keys, form bodies or OAuth codes.
+    console.error('OAuth authorization failed', { stage });
+    return new Response('The server could not finish connecting ChatGPT. Please try connecting again.', { status: 500, headers: secureHeaders });
+  }
 }
