@@ -58,7 +58,7 @@ The owner can choose the IMAP folder, a 1–365 day lookback (default 30), optio
 
 ### Automatic collection and event-driven processing
 
-Cloudflare collects the configured mailbox **every ten minutes**, in bounded five-message / 10 MiB / 25-second batches, with a UID/UIDVALIDITY cursor and an exclusive collector lease. Further backlog continues on later ticks. The existing independent **hourly** seven-day completed-source cleanup is unchanged. Collection is read-only and continues when the laptop and browser are closed. Pause it through the owner's mailbox enabled setting. Only the owner can call `/api/v1/mail/sync` manually; uploader keys and MCP tools cannot start a collector.
+Cloudflare collects the configured mailbox **every five minutes**, in bounded five-message / 10 MiB / 25-second batches, with a UID/UIDVALIDITY cursor and an exclusive collector lease. Further backlog continues on later ticks. The existing independent **hourly** seven-day completed-source cleanup is unchanged. Collection is read-only and continues when the laptop and browser are closed. Pause it through the owner's mailbox enabled setting. Only the owner can call `/api/v1/mail/sync` manually; uploader keys and MCP tools cannot start a collector.
 
 The production MCP endpoint is **`https://shortlist-desk.shortlists.workers.dev/mcp`**, with OAuth 2.1 authorization-code/PKCE authentication using Cloudflare's OAuth provider library. Only ChatGPT callbacks/redirects are supported. The owner explicitly connects the client using the existing owner key; the resulting agent credential is encrypted in OAuth grant properties, expires after 60 days and is revocable through the owner's access-key list. The agent can read the single mailbox queue, attachments and six-column master, reconcile source-listed candidates, create versions, publish, reuse and finish jobs. It cannot access mailbox credentials, change configuration, import a master or delete shortlists. Public pages contain no owner entry link.
 
@@ -88,7 +88,7 @@ Private API endpoints:
 | --- | --- | --- |
 | GET | `/api/v1/mail/status` | Owner/uploader; no password is returned |
 | PUT | `/api/v1/mail/config` | Owner only |
-| POST | `/api/v1/mail/sync` | Owner only; automatic collection runs every ten minutes |
+| POST | `/api/v1/mail/sync` | Owner only; automatic collection runs every five minutes |
 | POST | `/api/v1/mail/import` | Owner only; raw owned EML |
 | GET | `/api/v1/mail-jobs?status=pending&limit=20` | Owner/uploader; includes expired claims |
 | GET | `/api/v1/mail-jobs/{id}` | Owner/uploader; sources and prepared versions |

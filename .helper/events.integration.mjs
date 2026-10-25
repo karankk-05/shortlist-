@@ -56,6 +56,7 @@ try {
   const authParams = new URLSearchParams({ client_id: client.client_id, redirect_uri: client.redirect_uris[0], response_type: 'code', resource: origin + '/mcp', code_challenge: challenge, code_challenge_method: 'S256', state: 'synthetic-state', scope: 'shortlists:read shortlists:write queue:events offline_access' });
   const consent = await call('/oauth/authorize?' + authParams);
   assert.match(consent.value, /Connect Shortlist Desk to ChatGPT/);
+  assert.match(consent.value, /Return address: <strong>chatgpt.com<\/strong>/);
   const handle = consent.value.match(/name="handle" value="([^"]+)"/)[1];
   const cookie = consent.response.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
   await call('/oauth/authorize', { method: 'POST', form: new URLSearchParams({ decision: 'allow', handle, owner_key: ownerKey }), expected: 400 });

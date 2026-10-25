@@ -15,7 +15,7 @@ export async function queueStatus(db: D1Database) {
     FROM mail_jobs`).bind(time, time).first<{ actionable: number; processing: number; needs_review: number }>();
   const state = await db.prepare("SELECT value FROM settings WHERE key = 'mail_automation_last_run'").first<{ value: string }>();
   const sync = state ? JSON.parse(state.value) : null;
-  return { is_queue_empty: !counts?.actionable, actionable_count: counts?.actionable || 0, processing_count: counts?.processing || 0, review_count: counts?.needs_review || 0, sync, server_sync_interval_minutes: 10, checked_at: time };
+  return { is_queue_empty: !counts?.actionable, actionable_count: counts?.actionable || 0, processing_count: counts?.processing || 0, review_count: counts?.needs_review || 0, sync, server_sync_interval_minutes: 5, checked_at: time };
 }
 
 export function openAICallback(value: unknown): URL {
