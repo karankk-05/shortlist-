@@ -44,6 +44,25 @@ try {
     assert.equal(response.status, expected, `${method} ${path}: ${typeof value === 'object' ? JSON.stringify(value) : text.slice(0, 200)}`); checks++;
     return { value, response };
   }
+  const scheduleBundle = await build({ entryPoints: ['lib/mail-schedule.ts'], bundle: true, write: false, format: 'esm', platform: 'browser', logLevel: 'silent' });
+  const scheduler = await import('data:text/javascript;base64,' + Buffer.from(scheduleBundle.outputFiles[0].text).toString('base64'));
+  await call('/api/v1/mail/interval', { method: 'PUT', data: { minutes: 15 }, expected: 401 });
+  for (const minutes of [0, 1, 7, 120, '5']) await call('/api/v1/mail/interval', { method: 'PUT', owner: true, data: { minutes }, expected: 400 });
+  await db.prepare("INSERT INTO mail_state (account_id, last_uid) VALUES ('schedule-fixture', 123)").run();
+  await call('/api/v1/mail/interval', { method: 'PUT', owner: true, data: { minutes: 10 } });
+  assert.equal((await call('/api/v1/mail/status', { owner: true })).value.schedule.interval_minutes, 10);
+  assert.equal((await db.prepare("SELECT last_uid FROM mail_state WHERE account_id = 'schedule-fixture'").first()).last_uid, 123, 'Interval changes must preserve the scan cursor');
+  const tick = Date.parse('2026-01-01T12:00:00Z');
+  assert.equal(await scheduler.claimScheduledSync(db, tick), true);
+  assert.equal(await scheduler.claimScheduledSync(db, tick + 299000), false, 'Delayed delivery of the same tick cannot start another collector');
+  assert.equal(await scheduler.claimScheduledSync(db, tick + 300000), false, 'A ten-minute interval skips the five-minute tick');
+  const claims = await Promise.all([scheduler.claimScheduledSync(db, tick + 600000), scheduler.claimScheduledSync(db, tick + 600000)]);
+  assert.equal(claims.filter(Boolean).length, 1, 'Only one concurrent scheduler claims a due slot');
+  await call('/api/v1/mail/interval', { method: 'PUT', owner: true, data: { minutes: 5 } });
+  assert.equal(await scheduler.claimScheduledSync(db, tick + 901000), true);
+  assert.equal(await scheduler.claimScheduledSync(db, tick + 1200001), true, 'Cron delivery jitter must not turn a five-minute interval into ten minutes');
+  await db.prepare("DELETE FROM settings WHERE key = 'mail_sync_last_slot'").run();
+  await db.prepare("DELETE FROM mail_state WHERE account_id = 'schedule-fixture'").run();
   await call('/mcp', { method: 'POST', data: { jsonrpc: '2.0', id: 1, method: 'server/discover' }, expected: 401 });
   const resource = (await call('/.well-known/oauth-protected-resource/mcp')).value;
   assert.equal(resource.resource, origin + '/mcp');
@@ -71,6 +90,8 @@ try {
   async function mcp(method, params, expected = 200) { return (await call('/mcp', { method: 'POST', token: token.access_token, data: { jsonrpc: '2.0', id: ++checks, method, params }, expected })).value; }
   const discover = await mcp('server/discover'); assert.deepEqual(discover.result.supportedVersions, ['2026-07-28']);
   const tools = (await mcp('tools/list')).result.tools; assert.ok(tools.some(tool => tool.name === 'lookup_students')); assert.ok(tools.every(tool => tool.securitySchemes[0].type === 'oauth2'));
+  const fixtureKey = (await call('/api/v1/keys', { method: 'POST', owner: true, data: { label: 'Synthetic interval scope fixture', expires_in_days: 1 }, expected: 201 })).value.key;
+  await call('/api/v1/mail/interval', { method: 'PUT', token: fixtureKey, data: { minutes: 60 }, expected: 403 });
   assert.equal((await mcp('events/list')).result.events[0].name, 'shortlist.work_available');
   const tool = async (name, args = {}) => (await mcp('tools/call', { name, arguments: args })).result;
   const status = JSON.parse((await tool('queue_status')).content[0].text); assert.equal(status.is_queue_empty, true);
@@ -82,7 +103,7 @@ try {
   const master = (await call('/api/v1/master', { method: 'PUT', owner: true, data: { name: 'Synthetic MCP master', rows }, expected: 201 })).value;
   const lookup = JSON.parse((await tool('lookup_students', { queries: ['230001', 'synthetic-b@example.invalid', 'Missing Synthetic Candidate'] })).content[0].text);
   assert.equal(lookup.master_id, master.id); assert.deepEqual(lookup.results[0].matches, [rows[0]]); assert.deepEqual(lookup.results[1].matches, [rows[1]]); assert.equal(lookup.results[2].matches.length, 0);
-  for (const path of ['https://attacker.invalid/', '../keys', 'keys', 'mail/sync', 'master']) assert.equal((await tool('portal_write', { path, body: {} })).isError, true);
+  for (const path of ['https://attacker.invalid/', '../keys', 'keys', 'mail/sync', 'mail/interval', 'master']) assert.equal((await tool('portal_write', { path, body: {} })).isError, true);
   const subParams = callback => ({ name: 'shortlist.work_available', arguments: { queue: 'mail-shortlists' }, delivery: { mode: 'webhook', url: callback, secret } });
   const beforeInvalid = fetches;
   assert.ok((await mcp('events/subscribe', subParams('https://openai.com.attacker.invalid/callback'))).error);

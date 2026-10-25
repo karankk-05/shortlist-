@@ -36,6 +36,6 @@ const portal: ExportedHandler<Cloudflare.Env> = {
 };
 
 export default {
-  async scheduled(controller: ScheduledController, env: Cloudflare.Env) { await scheduledMail(env, controller.cron); },
+  async scheduled(controller: ScheduledController, env: Cloudflare.Env) { await scheduledMail(env, controller.cron, { scheduledTime: controller.scheduledTime }); },
   async fetch(request: Request, env: Cloudflare.Env, context: ExecutionContext) { return oauthProvider(env, portal).fetch(request, env, context); },
 } satisfies ExportedHandler<Cloudflare.Env>;

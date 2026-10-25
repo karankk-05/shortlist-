@@ -1,5 +1,6 @@
 import { mailConfig, mailHash, syncMail } from './mail-service';
 import { cleanupMail } from './mail-retention';
+import { mailSchedule, claimScheduledSync } from './mail-schedule';
 
 export const QUEUE_EVENT = 'shortlist.work_available';
 export const isoNow = () => new Date().toISOString();
@@ -15,7 +16,7 @@ export async function queueStatus(db: D1Database) {
     FROM mail_jobs`).bind(time, time).first<{ actionable: number; processing: number; needs_review: number }>();
   const state = await db.prepare("SELECT value FROM settings WHERE key = 'mail_automation_last_run'").first<{ value: string }>();
   const sync = state ? JSON.parse(state.value) : null;
-  return { is_queue_empty: !counts?.actionable, actionable_count: counts?.actionable || 0, processing_count: counts?.processing || 0, review_count: counts?.needs_review || 0, sync, server_sync_interval_minutes: 5, checked_at: time };
+  return { is_queue_empty: !counts?.actionable, actionable_count: counts?.actionable || 0, processing_count: counts?.processing || 0, review_count: counts?.needs_review || 0, sync, server_sync_interval_minutes: (await mailSchedule(db)).interval_minutes, checked_at: time };
 }
 
 export function openAICallback(value: unknown): URL {
@@ -106,9 +107,10 @@ export async function notifyQueue(env: Cloudflare.Env) {
   return { actionable_count: status.actionable_count, subscriptions: subscriptions.results.length };
 }
 
-export async function scheduledMail(env: Cloudflare.Env, cron: string) {
+export async function scheduledMail(env: Cloudflare.Env, cron: string, options: { scheduledTime?: number; force?: boolean } = {}) {
   if (cron === '0 * * * *') { await cleanupMail(env.DB); return; }
   const config = await mailConfig(env.DB);
+  if (!config.enabled || !options.force && !await claimScheduledSync(env.DB, options.scheduledTime)) { await notifyQueue(env); return; }
   const previous = await env.DB.prepare("SELECT value FROM settings WHERE key = 'mail_automation_last_run'").first<{ value: string }>();
   const last = previous ? JSON.parse(previous.value) : {};
   let state: Record<string, unknown> = { ...last, attempted_at: isoNow(), enabled: config.enabled, error: null };
