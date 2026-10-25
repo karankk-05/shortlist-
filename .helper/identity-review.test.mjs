@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { exportCandidateRows, readShortlistData, sameIdentityReviews, validateIdentityReviews } from '../lib/identity-review.ts';
+import { exportCandidateRows, publicShortlistData, readShortlistData, sameIdentityReviews, validateIdentityReviews } from '../lib/identity-review.ts';
 import { validateRows } from '../lib/records.ts';
 const master = [
   { name: 'Synthetic Name', roll: '0230001', programme: 'BTech', branch: 'Synthetic A', cpi: 0, email: 'a@example.invalid' },
@@ -42,4 +42,30 @@ test('duplicate detection ignores alternative order but retains uncertainty and 
   assert.equal(sameIdentityReviews(original, validateIdentityReviews([{ ...pending, possible_rolls: [...pending.possible_rolls].reverse() }], master)), true);
   assert.equal(sameIdentityReviews(original, []), false);
   assert.equal(sameIdentityReviews(original, validateIdentityReviews([{ ...pending, possible_rolls: [] }], master)), false);
+});
+test('2026 placement formatting filters only Y24/Y25 BS/BTech alternatives, preserving source counts and snapshots', () => {
+  const options = [
+    { ...master[0], roll: '230001' },
+    { ...master[0], roll: '240001', programme: 'B.S.' },
+    { ...master[0], roll: '250001', programme: 'B.Tech' },
+    { ...master[0], roll: '240002', programme: 'MTech' },
+    { ...master[0], roll: '250003', programme: 'MBA' },
+  ];
+  const data = { rows: [options[1]], unresolved_candidates: [{ source_name: pending.source_name, source_index: 3, reason: pending.reason, possible_matches: options }] };
+  const snapshot = structuredClone(data);
+  for (const season of ['2026', '2026–27', '2026-27', '2026/2027']) {
+    const result = publicShortlistData(data, { season, role: 'Engineer', round: 'Interview' });
+    assert.deepEqual(result.rows, data.rows, 'Explicitly confirmed rows are never removed');
+    assert.deepEqual(result.unresolved_candidates[0].possible_matches.map(row => row.roll), ['230001', '240002', '250003']);
+    assert.equal(result.unresolved_candidates.length, 1);
+    assert.equal('reason' in result.unresolved_candidates[0], false);
+  }
+  assert.deepEqual(data, snapshot, 'The stored alternatives are preserved');
+});
+test('internship, other-season and unknown-season displays preserve alternatives', () => {
+  const data = { rows: [], unresolved_candidates: [{ source_name: 'Synthetic', source_index: 1, reason: 'Private', possible_matches: [{ ...master[0], roll: '240001' }] }] };
+  for (const context of [undefined, { season: '2027', role: 'Engineer' }, { season: 'Unknown', role: 'Engineer' }, { season: '2026', role: 'Software Engineering Intern' }, { season: '2026–27', role: 'Unknown', round: 'Internship test' }]) assert.equal(publicShortlistData(data, context).unresolved_candidates[0].possible_matches.length, 1);
+  const empty = publicShortlistData(data, { season: '2026', role: 'Engineer' });
+  assert.equal(empty.unresolved_candidates.length, 1, 'A source candidate remains counted even when every alternative is filtered');
+  assert.equal(empty.unresolved_candidates[0].possible_matches.length, 0);
 });

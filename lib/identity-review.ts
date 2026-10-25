@@ -9,6 +9,7 @@ export type IdentityReview = {
 export type ShortlistData = { rows: StudentRow[]; unresolved_candidates: IdentityReview[] };
 export type PublicIdentityReview = Pick<IdentityReview, 'source_name' | 'possible_matches'>;
 export type PublicShortlistData = { rows: StudentRow[]; unresolved_candidates: PublicIdentityReview[] };
+export type AmbiguityDisplayContext = { season: string; role: string; round?: string; notes?: string };
 
 function text(value: unknown, label: string, maximum: number) {
   if (typeof value !== 'string' || !value.trim() || value.length > maximum || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value)) throw new InputError(`Invalid ${label}.`);
@@ -46,8 +47,9 @@ export function readShortlistData(value: StudentRow[] | ShortlistData): Shortlis
 }
 
 /** Source positions and reconciliation reasons are private, including for old snapshots. */
-export function publicShortlistData(data: ShortlistData): PublicShortlistData {
-  return { rows: data.rows, unresolved_candidates: data.unresolved_candidates.map(({ source_name, possible_matches }) => ({ source_name, possible_matches })) };
+export function publicShortlistData(data: ShortlistData, context?: AmbiguityDisplayContext): PublicShortlistData {
+  const placement2026 = !!context && /^2026(?:\s*[-–—/]\s*(?:27|2027))?$/.test(context.season.trim()) && !/\bintern(?:s|ship|ships)?\b/i.test([context.role, context.round, context.notes].filter(Boolean).join(' '));
+  return { rows: data.rows, unresolved_candidates: data.unresolved_candidates.map(({ source_name, possible_matches }) => ({ source_name, possible_matches: placement2026 ? possible_matches.filter(match => !(['bs', 'btech'].includes(match.programme.toLowerCase().replace(/[^a-z0-9]/g, '')) && /^(24|25)/.test(match.roll.trim()))) : possible_matches })) };
 }
 
 /** Flat six-column exports preserve one source candidate, without asserting an alternative. */

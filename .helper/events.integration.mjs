@@ -10,7 +10,7 @@ const signingKey = randomBytes(32), secret = 'whsec_' + signingKey.toString('bas
 const received = [];
 let fetches = 0, failDeliveries = false, checks = 0;
 const bundled = await build({ entryPoints: ['worker/index.ts'], bundle: true, write: false, format: 'esm', platform: 'browser', external: ['cloudflare:workers', 'cloudflare:sockets'], logLevel: 'silent' });
-const mf = new Miniflare({ modules: true, script: bundled.outputFiles[0].text, compatibilityDate: '2026-05-15', compatibilityFlags: ['global_fetch_strictly_public'], d1Databases: ['DB'], kvNamespaces: ['OAUTH_KV'], bindings: { ADMIN_KEY_SHA256: ownerHash, PORTAL_ORIGIN: origin }, serviceBindings: { ASSETS: () => new Response('<html></html>', { headers: { 'Content-Type': 'text/html' } }) }, outboundService: async request => {
+const mf = new Miniflare({ modules: true, script: bundled.outputFiles[0].text, compatibilityDate: '2026-05-15', compatibilityFlags: ['global_fetch_strictly_public'], d1Databases: ['DB'], kvNamespaces: ['OAUTH_KV'], bindings: { ADMIN_KEY_SHA256: ownerHash, PORTAL_ORIGIN: origin, PUBLIC_CAMPUS_ONLY: 'true' }, serviceBindings: { ASSETS: () => new Response('<html></html>', { headers: { 'Content-Type': 'text/html' } }) }, outboundService: async request => {
   fetches++;
   const url = new URL(request.url);
   assert.equal(url.origin, 'https://connectors.api.openai.com', 'No arbitrary outbound request or redirected destination is allowed');
@@ -38,8 +38,8 @@ try {
     }
     assert.equal(statement.trim(), '', 'Every fixture migration is complete');
   }
-  async function call(path, { method = 'GET', data, raw, token, cookie, expected = 200, form, owner = false, originHeader = origin } = {}) {
-    const response = await mf.dispatchFetch(origin + path, { method, redirect: 'manual', headers: { ...(token || owner ? { Authorization: 'Bearer ' + (owner ? ownerKey : token) } : {}), ...(cookie ? { Cookie: cookie } : {}), ...(data ? { 'Content-Type': 'application/json' } : raw ? { 'Content-Type': 'message/rfc822' } : form ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}), ...(method !== 'GET' ? { Origin: originHeader } : {}) }, body: data ? JSON.stringify(data) : raw || form });
+  async function call(path, { method = 'GET', data, raw, token, cookie, expected = 200, form, owner = false, originHeader = origin, campus = true } = {}) {
+    const response = await mf.dispatchFetch(origin + path, { method, redirect: 'manual', headers: { 'CF-Connecting-IP': campus ? '14.139.38.102' : '203.0.113.1', ...(token || owner ? { Authorization: 'Bearer ' + (owner ? ownerKey : token) } : {}), ...(cookie ? { Cookie: cookie } : {}), ...(data ? { 'Content-Type': 'application/json' } : raw ? { 'Content-Type': 'message/rfc822' } : form ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}), ...(method !== 'GET' ? { Origin: originHeader } : {}) }, body: data ? JSON.stringify(data) : raw || form });
     const text = await response.text(), value = response.headers.get('Content-Type')?.includes('application/json') ? JSON.parse(text) : text;
     assert.equal(response.status, expected, `${method} ${path}: ${typeof value === 'object' ? JSON.stringify(value) : text.slice(0, 200)}`); checks++;
     return { value, response };
@@ -72,6 +72,9 @@ try {
   await db.prepare("DELETE FROM mail_state WHERE account_id = 'schedule-fixture'").run();
   await call('/mcp', { method: 'POST', data: { jsonrpc: '2.0', id: 1, method: 'server/discover' }, expected: 401 });
   const resource = (await call('/.well-known/oauth-protected-resource/mcp')).value;
+  await call('/', { campus: false, expected: 403 });
+  await call('/api/v1/shortlists', { campus: false, expected: 403 });
+  await call('/.well-known/oauth-authorization-server', { campus: false });
   assert.equal(resource.resource, origin + '/mcp');
   const metadata = (await call('/.well-known/oauth-authorization-server')).value;
   assert.ok(metadata.code_challenge_methods_supported.includes('S256'));
@@ -101,7 +104,7 @@ try {
   const tokenParams = new URLSearchParams({ grant_type: 'authorization_code', client_id: client.client_id, code: redirect.searchParams.get('code'), redirect_uri: client.redirect_uris[0], resource: origin + '/mcp', code_verifier: verifier });
   const token = (await call('/oauth/token', { method: 'POST', form: tokenParams })).value;
   assert.ok(token.refresh_token); assert.ok(token.access_token);
-  async function mcp(method, params, expected = 200) { return (await call('/mcp', { method: 'POST', token: token.access_token, data: { jsonrpc: '2.0', id: ++checks, method, params }, expected })).value; }
+  async function mcp(method, params, expected = 200) { return (await call('/mcp', { method: 'POST', campus: false, token: token.access_token, data: { jsonrpc: '2.0', id: ++checks, method, params }, expected })).value; }
   const discover = await mcp('server/discover'); assert.deepEqual(discover.result.supportedVersions, ['2026-07-28']);
   const tools = (await mcp('tools/list')).result.tools; assert.ok(tools.some(tool => tool.name === 'lookup_students')); assert.ok(tools.every(tool => tool.securitySchemes[0].type === 'oauth2'));
   const fixtureKey = (await call('/api/v1/keys', { method: 'POST', owner: true, data: { label: 'Synthetic interval scope fixture', expires_in_days: 1 }, expected: 201 })).value.key;
@@ -158,6 +161,7 @@ try {
   const publication = JSON.parse((await tool('portal_write', { path: `shortlists/${draft.shortlist_id}/publish`, body: { version_id: draft.version_id, expected_current_version_id: null, acknowledge_warnings: true, mail_lease_token: claimed.lease_token } })).content[0].text);
   assert.equal(publication.published, true);
   const published = (await call('/api/v1/shortlists/' + draft.shortlist_id)).value;
+  assert.deepEqual(JSON.parse((await tool('portal_read', { path: `shortlists/${draft.shortlist_id}?public_view=1` })).content[0].text).rows, rows, 'The cloud agent can verify the published public view using its OAuth-backed MCP tool');
   assert.deepEqual(published.rows, rows); assert.equal(published.shortlist.role, 'Unknown'); assert.match(published.shortlist.added_at, /^2026-10-25T10:00:00/);
   await tool('portal_write', { path: `mail-jobs/${job.id}/complete`, body: { lease_token: claimed.lease_token, note: 'Published and publicly verified both synthetic source candidates with preserved CPI and order.' } });
   assert.equal((await db.prepare('SELECT status FROM mail_jobs WHERE id = ?').bind(job.id).first()).status, 'done');

@@ -1,8 +1,9 @@
-import { handle } from '../lib/server';
+import { actor, handle } from '../lib/server';
 import { agentGuide } from '../lib/agent-guide';
 import { mailGuide } from '../lib/mail-guide';
 import { scheduledMail, notifyQueue } from '../lib/queue-runtime';
 import { authorizeAgent, oauthProvider } from '../lib/oauth';
+import { campusAccessDenied, campusRestrictionEnabled, isIitkNetwork } from '../lib/campus-network';
 
 const portal: ExportedHandler<Cloudflare.Env> = {
   async fetch(request: Request, env: Cloudflare.Env, context: ExecutionContext): Promise<Response> {
@@ -25,7 +26,14 @@ const portal: ExportedHandler<Cloudflare.Env> = {
     const response = ownerEntry
       ? new HTMLRewriter().on('html', { element(element) { element.setAttribute('data-owner-entry', 'true'); } }).transform(await env.ASSETS.fetch(new Request(new URL('/', request.url), request)))
       : await env.ASSETS.fetch(request);
+    const html = response.headers.get('Content-Type')?.includes('text/html');
+    const privateWorkspace = ownerEntry || ['/upload', '/guide', '/mail'].includes(path);
+    if (html && !privateWorkspace && campusRestrictionEnabled(env) && !isIitkNetwork(request) && !await actor(request)) {
+      await response.body?.cancel();
+      return campusAccessDenied(true);
+    }
     const secured = new Response(response.body, response);
+    if (html) { secured.headers.set('Cache-Control', 'no-store'); secured.headers.set('Vary', 'CF-Connecting-IP, Cookie, Authorization'); }
     secured.headers.set('X-Content-Type-Options', 'nosniff');
     secured.headers.set('Referrer-Policy', 'same-origin');
     if (ownerEntry) { secured.headers.set('Cache-Control', 'no-store'); secured.headers.set('Referrer-Policy', 'no-referrer'); secured.headers.set('X-Robots-Tag', 'noindex, nofollow'); }

@@ -10,6 +10,7 @@ import { exportCandidateRows, publicShortlistData, readShortlistData, sameIdenti
 import { COLUMNS, csvRows, InputError, sameShortlistRows, StudentRow, toCSV, validateRows } from './records';
 import { queueStatus } from './queue-runtime';
 import { mailSchedule, validateSyncInterval, MIN_SYNC_INTERVAL, MAX_SYNC_INTERVAL } from './mail-schedule';
+import { campusAccessDenied, campusRestrictionEnabled, isIitkNetwork } from './campus-network';
 
 type Actor = { role: 'admin' | 'uploader'; id: string; label: string };
 type List = { id: string; company: string; role: string; round: string; season: string; notes: string; published_version_id: string | null; created_at: string; updated_at: string };
@@ -214,6 +215,7 @@ export async function handle(request: Request): Promise<Response> {
     const parts = url.pathname.replace(/^\/api\/v1\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
     if (parts.length > 3) throw new InputError('Endpoint not found.', 404);
     const [resource, item, action] = parts;
+    if (resource === 'shortlists' && ['GET', 'HEAD'].includes(method) && campusRestrictionEnabled(env) && !isIitkNetwork(request) && !await actor(request)) return campusAccessDenied();
     if (method === 'GET' && resource === 'health') return json({ status: 'ok', service: 'shortlist-desk', version: 1, merging: 'external-agent' });
     if (method === 'GET' && resource === 'agent') return plain(agentGuide(url.origin), 'text/markdown; charset=utf-8');
     if (method === 'GET' && resource === 'mail-agent') return plain(mailGuide(url.origin), 'text/markdown; charset=utf-8');
@@ -415,13 +417,15 @@ export async function handle(request: Request): Promise<Response> {
         }
         if (action && action !== 'export.csv') throw new InputError('Endpoint not found.', 404);
         let versionId = list.published_version_id;
+        const publicView = url.searchParams.get('public_view') === '1';
+        if (publicView && url.searchParams.has('version_id')) throw new InputError('Public view always reads the published version; omit version_id.');
         if (url.searchParams.has('version_id')) { await access(request); versionId = url.searchParams.get('version_id'); }
         if (!versionId) throw new InputError('This shortlist has not been published.', 404);
         const version = await findVersion(versionId, item), data = await versionData(version);
         if (action === 'export.csv') {
           return plain(toCSV(exportCandidateRows(data)), 'text/csv; charset=utf-8', { 'X-Unresolved-Candidates': String(data.unresolved_candidates.length), 'Content-Disposition': `attachment; filename="${list.company.replace(/[^a-zA-Z0-9_-]/g, '_')}_shortlist.csv"` });
         }
-        return json({ shortlist: list, version: publicVersion(version), columns: COLUMNS, ...(await actor(request) ? data : publicShortlistData(data)) });
+        return json({ shortlist: list, version: publicVersion(version), columns: COLUMNS, ...(!publicView && await actor(request) ? data : publicShortlistData(data, list)) });
       }
     }
     throw new InputError('Endpoint not found. See /api/v1/openapi.json.', 404);
@@ -462,7 +466,7 @@ function openapi(origin: string) {
     '/mail-jobs/{id}/retry': { parameters: [parameter], post: { operationId: 'retryMailJob', summary: 'Owner only: requeue a reviewed/ignored source with an optional private comment for the agent', security: ownerOnly, requestBody: bodySchema({ type: 'object', properties: { comment: { type: 'string', maxLength: 2000 }, expected_updated_at: { type: 'string' } } }), responses: response } },
     '/mail-jobs/{id}/comment': { parameters: [parameter], put: { operationId: 'saveMailOwnerComment', summary: 'Owner only: edit the comment on a pending job before it is claimed', security: ownerOnly, requestBody: bodySchema({ type: 'object', required: ['comment', 'expected_updated_at'], properties: { comment: { type: 'string', maxLength: 2000 }, expected_updated_at: { type: 'string' } } }), responses: response } },
     '/shortlists': { get: { operationId: 'listShortlists', summary: 'List published shortlists by added_at, newest first; optional server-generated company groups and round categories', parameters: [{ name: 'include_drafts', in: 'query', schema: { type: 'integer', enum: [1] }, description: 'Requires authentication when set.' }, { name: 'grouped', in: 'query', schema: { type: 'integer', enum: [1] }, description: 'Also return company_groups and normalized round_categories. Includes nested company_groups.rounds.roles.shortlists. Raw shortlists, original rounds and dates are preserved.' }], responses: response }, post: { operationId: 'createShortlistDraft', summary: 'Create a shortlist and its first draft', security: secured, requestBody: bodySchema(draft), responses: { ...response, '201': { description: 'Draft created; not public until published' } } } },
-    '/shortlists/{id}': { parameters: [parameter], get: { operationId: 'readShortlist', summary: 'Read confirmed six-column rows and separate unresolved_candidates with possible master matches', responses: response }, delete: { operationId: 'deleteShortlist', summary: 'Owner only: hide a shortlist and retain its versions for recovery', security: ownerOnly, requestBody: deleteBody, responses: response } },
+    '/shortlists/{id}': { parameters: [parameter], get: { operationId: 'readShortlist', summary: 'Read a published shortlist on campus or with authentication; public_view=1 gives cloud agents the formatted published view', parameters: [{ name: 'public_view', in: 'query', schema: { type: 'integer', enum: [1] }, description: 'Published public projection, including server-side display filters and excluding private reconciliation metadata. Cannot be combined with version_id.' }], responses: response }, delete: { operationId: 'deleteShortlist', summary: 'Owner only: hide a shortlist and retain its versions for recovery', security: ownerOnly, requestBody: deleteBody, responses: response } },
     '/shortlists/deleted': { get: { operationId: 'listDeletedShortlists', summary: 'Owner only: list deleted shortlists', security: ownerOnly, responses: response } },
     '/shortlists/{id}/undelete': { parameters: [parameter], post: { operationId: 'undeleteShortlist', summary: 'Owner only: restore a deleted shortlist and its previous publication', security: ownerOnly, requestBody: deleteBody, responses: response } },
     '/shortlists/{id}/export.csv': { parameters: [parameter], get: { operationId: 'downloadShortlist', summary: 'Download six-column CSV; ambiguous entries retain source names with blank identity fields. JSON retains all alternatives.', responses: response } },

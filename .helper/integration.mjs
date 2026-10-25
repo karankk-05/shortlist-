@@ -25,10 +25,10 @@ try {
   }
   if (!ready) throw new Error('Preview failed to start: ' + logs);
 let ownerCookie = '', uploaderKey = '', count = 0;
-async function call(path, { method = 'GET', owner = false, key = false, data, expected = 200, cookie, evil = false, form, raw } = {}) {
+async function call(path, { method = 'GET', owner = false, key = false, data, expected = 200, cookie, evil = false, form, raw, campus = true, forwarded } = {}) {
   // Synchronous SQL fixture commands can outlast the local server's keep-alive timeout.
   // Close test connections so Node 22 never reuses a stale socket after a fixture write.
-  const response = await fetch(origin + '/api/v1/' + path, { method, headers: { Connection: 'close', ...(owner ? { Cookie: ownerCookie } : cookie ? { Cookie: cookie } : {}), ...(key ? { Authorization: `Bearer ${uploaderKey}` } : {}), ...(raw ? { 'Content-Type': 'message/rfc822' } : data ? { 'Content-Type': 'application/json' } : {}), ...(method !== 'GET' ? { Origin: evil ? 'https://evil.example.invalid' : origin } : {}) }, body: raw || form || (data ? JSON.stringify(data) : undefined), redirect: 'manual' });
+  const response = await fetch(origin + '/api/v1/' + path, { method, headers: { Connection: 'close', 'CF-Connecting-IP': campus ? '14.139.38.102' : '203.0.113.1', ...(forwarded ? { 'X-Forwarded-For': forwarded } : {}), ...(owner ? { Cookie: ownerCookie } : cookie ? { Cookie: cookie } : {}), ...(key ? { Authorization: `Bearer ${uploaderKey}` } : {}), ...(raw ? { 'Content-Type': 'message/rfc822' } : data ? { 'Content-Type': 'application/json' } : {}), ...(method !== 'GET' ? { Origin: evil ? 'https://evil.example.invalid' : origin } : {}) }, body: raw || form || (data ? JSON.stringify(data) : undefined), redirect: 'manual' });
   const result = response.headers.get('Content-Type')?.includes('application/json') ? await response.json() : await response.text();
   assert.equal(response.status, expected, `${method} ${path}: ${typeof result === 'object' ? result.error : response.status}`); count++;
   return { result, response };
@@ -41,7 +41,12 @@ const ownerPage = await fetch(origin + ownerEntry, { headers: { Connection: 'clo
 assert.equal(ownerPage.status, 200); assert.match(await ownerPage.text(), /data-owner-entry="true"/);
 assert.equal(ownerPage.headers.get('Cache-Control'), 'no-store'); assert.equal(ownerPage.headers.get('X-Robots-Tag'), 'noindex, nofollow'); count++;
 assert.equal((await call('me')).result.owner_entry_path, undefined);
-const publicPage = await fetch(origin + '/', { headers: { Connection: 'close' } }); assert.equal((await publicPage.text()).includes(ownerEntry), false); count++;
+const publicPage = await fetch(origin + '/', { headers: { Connection: 'close', 'CF-Connecting-IP': '14.139.38.102' } }); assert.equal(publicPage.status, 200); assert.equal((await publicPage.text()).includes(ownerEntry), false); count++;
+for (const path of ['/', '/index.html', '/unknown-spa-route']) {
+  const denied = await fetch(origin + path, { headers: { Connection: 'close', 'CF-Connecting-IP': '203.0.113.1', 'X-Forwarded-For': '14.139.38.102' } });
+  assert.equal(denied.status, 403); assert.match(await denied.text(), /IITK network required/); count++;
+}
+assert.equal((await call('shortlists', { campus: false, expected: 403, forwarded: '14.139.38.102' })).result.code, 'iitk_network_required');
 const signin = await call('session', { method: 'POST', data: { key: ownerKey } });
 ownerCookie = signin.response.headers.getSetCookie().map(cookie => cookie.split(';')[0]).join('; ');
 assert.match(ownerCookie, /^shortlist_session=/);
@@ -85,6 +90,11 @@ await call(`shortlists/${draft.shortlist_id}/publish`, { method: 'POST', key: tr
 const published = (await call('shortlists/' + draft.shortlist_id)).result;
 assert.deepEqual(published.rows, rows); assert.equal(JSON.stringify(published).includes('reconciliation'), false);
 assert.deepEqual(published.columns, ['name', 'roll', 'programme', 'branch', 'cpi', 'email']);
+await call('shortlists/' + draft.shortlist_id, { campus: false, expected: 403 });
+await call(`shortlists/${draft.shortlist_id}/export.csv`, { campus: false, expected: 403 });
+assert.deepEqual((await call(`shortlists/${draft.shortlist_id}?public_view=1`, { campus: false, owner: true })).result.rows, rows);
+assert.deepEqual((await call(`shortlists/${draft.shortlist_id}?public_view=1`, { campus: false, key: true })).result.rows, rows);
+await call(`shortlists/${draft.shortlist_id}?public_view=1&version_id=${draft.version_id}`, { key: true, expected: 400 });
 const csv = (await call(`shortlists/${draft.shortlist_id}/export.csv`)).result; assert.match(csv, /0230001/);
 await call(`shortlists/${draft.shortlist_id}/versions`, { expected: 401 });
 const v2data = { master_id: master.id, rows: [rows[1]], expected_latest_version_id: draft.version_id, processing_notes: 'Second synthetic version' };
