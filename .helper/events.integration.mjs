@@ -38,8 +38,8 @@ try {
     }
     assert.equal(statement.trim(), '', 'Every fixture migration is complete');
   }
-  async function call(path, { method = 'GET', data, raw, token, cookie, expected = 200, form, owner = false } = {}) {
-    const response = await mf.dispatchFetch(origin + path, { method, redirect: 'manual', headers: { ...(token || owner ? { Authorization: 'Bearer ' + (owner ? ownerKey : token) } : {}), ...(cookie ? { Cookie: cookie } : {}), ...(data ? { 'Content-Type': 'application/json' } : raw ? { 'Content-Type': 'message/rfc822' } : form ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}), ...(method !== 'GET' ? { Origin: origin } : {}) }, body: data ? JSON.stringify(data) : raw || form });
+  async function call(path, { method = 'GET', data, raw, token, cookie, expected = 200, form, owner = false, originHeader = origin } = {}) {
+    const response = await mf.dispatchFetch(origin + path, { method, redirect: 'manual', headers: { ...(token || owner ? { Authorization: 'Bearer ' + (owner ? ownerKey : token) } : {}), ...(cookie ? { Cookie: cookie } : {}), ...(data ? { 'Content-Type': 'application/json' } : raw ? { 'Content-Type': 'message/rfc822' } : form ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}), ...(method !== 'GET' ? { Origin: originHeader } : {}) }, body: data ? JSON.stringify(data) : raw || form });
     const text = await response.text(), value = response.headers.get('Content-Type')?.includes('application/json') ? JSON.parse(text) : text;
     assert.equal(response.status, expected, `${method} ${path}: ${typeof value === 'object' ? JSON.stringify(value) : text.slice(0, 200)}`); checks++;
     return { value, response };
@@ -75,10 +75,13 @@ try {
   const authParams = new URLSearchParams({ client_id: client.client_id, redirect_uri: client.redirect_uris[0], response_type: 'code', resource: origin + '/mcp', code_challenge: challenge, code_challenge_method: 'S256', state: 'synthetic-state', scope: 'shortlists:read shortlists:write queue:events offline_access' });
   const consent = await call('/oauth/authorize?' + authParams);
   assert.match(consent.value, /Connect Shortlist Desk to ChatGPT/);
+  assert.equal(consent.response.headers.get('Referrer-Policy'), 'same-origin', 'The form must preserve a non-null Origin header on browser navigation POSTs');
   assert.match(consent.value, /Return address: <strong>chatgpt.com<\/strong>/);
   const handle = consent.value.match(/name="handle" value="([^"]+)"/)[1];
   const cookie = consent.response.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
   await call('/oauth/authorize', { method: 'POST', form: new URLSearchParams({ decision: 'allow', handle, owner_key: ownerKey }), expected: 400 });
+  await call('/oauth/authorize', { method: 'POST', cookie, originHeader: 'null', form: new URLSearchParams({ decision: 'allow', handle, owner_key: ownerKey }), expected: 403 });
+  await call('/oauth/authorize', { method: 'POST', cookie, originHeader: 'https://untrusted.invalid', form: new URLSearchParams({ decision: 'allow', handle, owner_key: ownerKey }), expected: 403 });
   const authorized = await call('/oauth/authorize', { method: 'POST', cookie, form: new URLSearchParams({ decision: 'allow', handle, owner_key: ownerKey }), expected: 303 });
   const redirect = new URL(authorized.response.headers.get('Location'));
   assert.equal(redirect.origin, 'https://chatgpt.com');
