@@ -10,5 +10,6 @@ declare namespace Cloudflare {
     OAUTH_PROVIDER: import('@cloudflare/workers-oauth-provider').OAuthHelpers;
     PORTAL_ORIGIN?: string;
     PUBLIC_CAMPUS_ONLY?: string;
+    CLOUDFLARE_ACCOUNT_ID?: string;
   }
 }

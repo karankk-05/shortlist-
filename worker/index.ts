@@ -4,6 +4,8 @@ import { mailGuide } from '../lib/mail-guide';
 import { scheduledMail, notifyQueue } from '../lib/queue-runtime';
 import { authorizeAgent, oauthProvider } from '../lib/oauth';
 import { campusAccessDenied, campusRestrictionEnabled, isIitkNetwork } from '../lib/campus-network';
+import { recordUsage, SAMPLE_RATE } from '../lib/usage';
+import { cleanupUsage } from '../lib/usage-service';
 
 const portal: ExportedHandler<Cloudflare.Env> = {
   async fetch(request: Request, env: Cloudflare.Env, context: ExecutionContext): Promise<Response> {
@@ -44,6 +46,19 @@ const portal: ExportedHandler<Cloudflare.Env> = {
 };
 
 export default {
-  async scheduled(controller: ScheduledController, env: Cloudflare.Env) { await scheduledMail(env, controller.cron, { scheduledTime: controller.scheduledTime }); },
-  async fetch(request: Request, env: Cloudflare.Env, context: ExecutionContext) { return oauthProvider(env, portal).fetch(request, env, context); },
+  async scheduled(controller: ScheduledController, env: Cloudflare.Env, context: ExecutionContext) {
+    if (controller.cron === '0 * * * *') context.waitUntil(cleanupUsage(env.DB).catch(() => { console.error('Usage retention check failed.'); }));
+    await scheduledMail(env, controller.cron, { scheduledTime: controller.scheduledTime });
+  },
+  async fetch(request: Request, env: Cloudflare.Env, context: ExecutionContext) {
+    const started = Date.now(), sampled = Math.random() < SAMPLE_RATE;
+    let status = 500;
+    try {
+      const response = await oauthProvider(env, portal).fetch(request, env, context);
+      status = response.status;
+      return response;
+    } finally {
+      if (sampled) context.waitUntil(recordUsage(env.DB, request, status, Date.now() - started, started).catch(() => { /* Monitoring must never interrupt the site. */ }));
+    }
+  },
 } satisfies ExportedHandler<Cloudflare.Env>;

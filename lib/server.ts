@@ -11,6 +11,7 @@ import { COLUMNS, csvRows, InputError, sameShortlistRows, StudentRow, toCSV, val
 import { queueStatus } from './queue-runtime';
 import { mailSchedule, validateSyncInterval, MIN_SYNC_INTERVAL, MAX_SYNC_INTERVAL } from './mail-schedule';
 import { campusAccessDenied, campusRestrictionEnabled, isIitkNetwork } from './campus-network';
+import { connectUsage, disconnectUsage, usageSummary } from './usage-service';
 
 type Actor = { role: 'admin' | 'uploader'; id: string; label: string };
 type List = { id: string; company: string; role: string; round: string; season: string; notes: string; published_version_id: string | null; created_at: string; updated_at: string };
@@ -215,6 +216,13 @@ export async function handle(request: Request): Promise<Response> {
     const parts = url.pathname.replace(/^\/api\/v1\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
     if (parts.length > 3) throw new InputError('Endpoint not found.', 404);
     const [resource, item, action] = parts;
+    if (resource === 'usage') {
+      await access(request, true);
+      if (method === 'GET' && !item) return json(await usageSummary(env));
+      if (method === 'PUT' && item === 'cloudflare' && !action) return json(await connectUsage(env, (await body(request)).token));
+      if (method === 'DELETE' && item === 'cloudflare' && !action) return json(await disconnectUsage(db()));
+      throw new InputError('Usage endpoint not found.', 404);
+    }
     if (resource === 'shortlists' && ['GET', 'HEAD'].includes(method) && campusRestrictionEnabled(env) && !isIitkNetwork(request) && !await actor(request)) return campusAccessDenied();
     if (method === 'GET' && resource === 'health') return json({ status: 'ok', service: 'shortlist-desk', version: 1, merging: 'external-agent' });
     if (method === 'GET' && resource === 'agent') return plain(agentGuide(url.origin), 'text/markdown; charset=utf-8');
