@@ -1,6 +1,7 @@
 import { mailConfig, mailHash, syncMail } from './mail-service';
 import { cleanupMail } from './mail-retention';
 import { mailSchedule, claimScheduledSync } from './mail-schedule';
+import { eventConnectionActive } from './oauth-grant';
 
 export const QUEUE_EVENT = 'shortlist.work_available';
 export const isoNow = () => new Date().toISOString();
@@ -57,12 +58,7 @@ async function subscriptionAllowed(env: Cloudflare.Env, sub: AgentSubscription) 
   if (sub.revoked_at || sub.expires_at <= isoNow()) return false;
   const key = await env.DB.prepare('SELECT id FROM access_keys WHERE id = ? AND revoked_at IS NULL AND expires_at > ?').bind(sub.principal_id, isoNow()).first();
   if (!key) return false;
-  if (sub.grant_id) {
-    // OAuthProvider injects its helper only during fetch; the scheduler uses the same library API.
-    const { oauthHelpers } = await import('./oauth');
-    const grants = await oauthHelpers(env).listUserGrants(sub.user_id, { limit: 100 });
-    if (!grants.items.some(grant => grant.id === sub.grant_id && (!grant.expiresAt || grant.expiresAt * 1000 > Date.now()))) return false;
-  }
+  if (sub.grant_id && !await eventConnectionActive(env, { ...sub, grant_id: sub.grant_id })) return false;
   return true;
 }
 
@@ -73,9 +69,13 @@ export async function notifyQueue(env: Cloudflare.Env) {
   const error = status.sync?.error || null;
   const baseFingerprint = jobs.results.length ? 'jobs:' + await mailHash(JSON.stringify(jobs.results)) : error ? 'sync:' + error + ':' + (status.sync.last_success_at || '') : null;
   const subscriptions = await db.prepare('SELECT * FROM agent_subscriptions WHERE revoked_at IS NULL AND expires_at > ? LIMIT 10').bind(time).all<AgentSubscription>();
+  if (!baseFingerprint) {
+    // Work may have been completed while a notification was awaiting a retry.
+    // Discard obsolete wakeups without touching OAuth or any mailbox/student data.
+    await db.prepare("UPDATE agent_deliveries SET status = 'dead', lock_until = NULL, last_error = 'queue_empty' WHERE status = 'pending' OR (status = 'delivering' AND lock_until <= ?)").bind(time).run();
+    return { actionable_count: status.actionable_count, subscriptions: subscriptions.results.length };
+  }
   for (const sub of subscriptions.results) {
-    if (!await subscriptionAllowed(env, sub)) { await db.prepare('UPDATE agent_subscriptions SET revoked_at = ? WHERE id = ?').bind(time, sub.id).run(); continue; }
-    if (!baseFingerprint) continue;
     // A changed queue wakes immediately. An unchanged unclaimed queue gets one recovery wake every 30 min.
     const recovery = sub.last_fingerprint === baseFingerprint && sub.last_notified_at && Date.now() - Date.parse(sub.last_notified_at) >= 1800000;
     const fingerprint = baseFingerprint + (recovery ? ':recovery:' + Math.floor(Date.now() / 1800000) : '');
@@ -87,10 +87,15 @@ export async function notifyQueue(env: Cloudflare.Env) {
   for (const item of due.results) {
     const locked = await db.prepare("UPDATE agent_deliveries SET status = 'delivering', lock_until = ?, attempts = attempts + 1 WHERE id = ? AND ((status = 'pending' AND next_attempt_at <= ?) OR (status = 'delivering' AND lock_until <= ?))").bind(new Date(Date.now() + 60000).toISOString(), item.id, time, time).run();
     if (!locked.meta.changes) continue;
-    const sub = subscriptions.results.find(value => value.id === item.subscription_id);
+    // Re-read the subscription at delivery time so a concurrent unsubscribe is
+    // respected. Authorization is checked only for an actual delivery attempt.
+    const sub = await db.prepare('SELECT * FROM agent_subscriptions WHERE id = ? AND revoked_at IS NULL AND expires_at > ?').bind(item.subscription_id, isoNow()).first<AgentSubscription>();
     let httpStatus: number | null = null, errorCode: string | null = null;
     try {
-      if (!sub || !await subscriptionAllowed(env, sub)) throw new Error('subscription_inactive');
+      if (!sub || !await subscriptionAllowed(env, sub)) {
+        if (sub) await db.prepare('UPDATE agent_subscriptions SET revoked_at = ? WHERE id = ?').bind(isoNow(), sub.id).run();
+        throw new Error('subscription_inactive');
+      }
       const response = await signedWebhook(sub, JSON.parse(item.payload), item.id); httpStatus = response.status;
       if (response.ok) {
         await db.batch([
@@ -99,7 +104,7 @@ export async function notifyQueue(env: Cloudflare.Env) {
         ]); continue;
       }
       errorCode = 'callback_http_' + response.status;
-    } catch (error) { errorCode = error instanceof Error && ['subscription_inactive', 'callback_redirect', 'payload_too_large'].includes(error.message) ? error.message : 'callback_unreachable'; }
+    } catch (error) { errorCode = error instanceof Error && ['subscription_inactive', 'subscription_check_unavailable', 'callback_redirect', 'payload_too_large'].includes(error.message) ? error.message : 'callback_unreachable'; }
     const permanent = httpStatus === 410 || httpStatus === 413 || httpStatus !== null && httpStatus >= 400 && httpStatus < 500 && ![408, 429].includes(httpStatus) || ['subscription_inactive', 'callback_redirect', 'payload_too_large'].includes(errorCode || '') || item.attempts + 1 >= 5;
     await db.prepare('UPDATE agent_deliveries SET status = ?, next_attempt_at = ?, lock_until = NULL, last_status = ?, last_error = ? WHERE id = ?').bind(permanent ? 'dead' : 'pending', new Date(Date.now() + Math.min(3600000, 600000 * 2 ** item.attempts)).toISOString(), httpStatus, errorCode, item.id).run();
     if (httpStatus === 410 && sub) await db.prepare('UPDATE agent_subscriptions SET revoked_at = ? WHERE id = ?').bind(isoNow(), sub.id).run();

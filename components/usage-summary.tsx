@@ -63,6 +63,10 @@ export default function UsagePanel() {
         <Allowance label="Database rows read / day" value={data.quotas.rows_read} note={data.quotas.rows_read.used === null ? 'Account-wide · Connect read-only Cloudflare analytics to measure' : 'Cloudflare-reported · All D1 databases in this account'} />
         <Allowance label="Database rows written / day" value={data.quotas.rows_written} note="Account-wide · Includes mail processing and monitoring writes" />
         <Allowance label="This database’s storage" value={data.quotas.storage} bytes note="Measured database size · Storage does not reset daily" />
+        <Allowance label="KV reads / day" value={data.quotas.kv_reads} note="Account-wide · Includes connection and token checks" />
+        <Allowance label="KV writes / day" value={data.quotas.kv_writes} note="Account-wide · Includes OAuth tokens and refreshes" />
+        <Allowance label="KV list operations / day" value={data.quotas.kv_lists} note="Account-wide · Background notification checks no longer list grants" />
+        <Allowance label="KV deletes / day" value={data.quotas.kv_deletes} note="Account-wide · Includes token revocation and cleanup" />
       </div>
       <div className="usage-explanation">
         <p>Daily allowances reset at <strong>{time(data.day.reset_at)} IST</strong>. Alerts appear at 75% and 90%.</p>

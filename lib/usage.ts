@@ -2,7 +2,7 @@
  * query strings, IPs, headers, identities, credentials, or request/response bodies. */
 export const SAMPLE_RATE = 0.1;
 export const USAGE_RETENTION_DAYS = 31;
-export const FREE_LIMITS = { worker_requests: 100_000, d1_rows_read: 5_000_000, d1_rows_written: 100_000, database_bytes: 500_000_000 };
+export const FREE_LIMITS = { worker_requests: 100_000, d1_rows_read: 5_000_000, d1_rows_written: 100_000, database_bytes: 500_000_000, kv_reads: 100_000, kv_writes: 1_000, kv_deletes: 1_000, kv_lists: 1_000 };
 export const CATEGORY_LABELS = {
   pages: 'Pages', assets: 'Scripts, styles & images', shortlist_reads: 'Shortlist views & downloads',
   shortlist_writes: 'Shortlist publishing & edits', mail: 'Mail & queue', agent: 'Agent / MCP',

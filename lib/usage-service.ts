@@ -1,7 +1,7 @@
 import { InputError } from './records';
 import { FREE_LIMITS, SAMPLE_RATE, USAGE_RETENTION_DAYS, quota, summarizeUsage, utcUsageDay, type UsageBucket } from './usage';
 
-type CloudflareUsage = { day: string; fetched_at: string; worker_requests: number | null; site_requests: number | null; site_errors: number | null; d1_rows_read: number | null; d1_rows_written: number | null; error: string | null };
+type CloudflareUsage = { day: string; fetched_at: string; worker_requests: number | null; site_requests: number | null; site_errors: number | null; d1_rows_read: number | null; d1_rows_written: number | null; kv_reads: number | null; kv_writes: number | null; kv_deletes: number | null; kv_lists: number | null; error: string | null };
 const TOKEN_KEY = 'usage_cloudflare_token', CACHE_KEY = 'usage_cloudflare_cache';
 const CF_GRAPHQL = 'https://api.cloudflare.com/client/v4/graphql';
 const CACHE_MS = 300_000;
@@ -44,7 +44,7 @@ function total(groups: any, key: string): number | null {
 export async function fetchCloudflareUsage(env: Cloudflare.Env, token: string, time = Date.now()): Promise<CloudflareUsage> {
   if (!/^[a-f0-9]{32}$/.test(env.CLOUDFLARE_ACCOUNT_ID || '')) throw new InputError('Cloudflare account is not configured.', 503);
   const day = utcUsageDay(time), variables = { account: env.CLOUDFLARE_ACCOUNT_ID!, start: day.start, end: new Date(time).toISOString(), script: 'shortlist-desk' };
-  const [workers, database] = await Promise.allSettled([
+  const [workers, database, kv] = await Promise.allSettled([
     graphql(token, `query Usage($account: string!, $start: string!, $end: string!, $script: string!) {
       viewer { accounts(filter: {accountTag: $account}) {
         allWorkers: workersInvocationsAdaptive(limit: 1, filter: {datetime_geq: $start, datetime_leq: $end}) { sum { requests } }
@@ -54,9 +54,14 @@ export async function fetchCloudflareUsage(env: Cloudflare.Env, token: string, t
       viewer { accounts(filter: {accountTag: $account}) {
         database: d1AnalyticsAdaptiveGroups(limit: 1, filter: {date_geq: $start, date_leq: $end}) { sum { rowsRead rowsWritten } }
       } } }`, { account: variables.account, start: variables.start.slice(0, 10), end: variables.end.slice(0, 10) }),
+    graphql(token, `query KvUsage($account: string!, $start: Date!, $end: Date!) {
+      viewer { accounts(filter: {accountTag: $account}) {
+        operations: kvOperationsAdaptiveGroups(limit: 100, filter: {date_geq: $start, date_leq: $end}) { dimensions { actionType } sum { requests } }
+      } } }`, { account: variables.account, start: variables.start.slice(0, 10), end: variables.end.slice(0, 10) }),
   ]);
-  const w = workers.status === 'fulfilled' ? workers.value : null, d = database.status === 'fulfilled' ? database.value : null;
-  return { day: day.start, fetched_at: new Date(time).toISOString(), worker_requests: total(w?.allWorkers, 'requests'), site_requests: total(w?.site, 'requests'), site_errors: total(w?.site, 'errors'), d1_rows_read: total(d?.database, 'rowsRead'), d1_rows_written: total(d?.database, 'rowsWritten'), error: w && d ? null : 'Some Cloudflare analytics are unavailable. Check the token’s Account Analytics: Read permission and account access.' };
+  const w = workers.status === 'fulfilled' ? workers.value : null, d = database.status === 'fulfilled' ? database.value : null, k = kv.status === 'fulfilled' ? kv.value : null;
+  const kvCount = (action: string) => Array.isArray(k?.operations) ? total(k.operations.filter((row: any) => row.dimensions?.actionType === action), 'requests') : null;
+  return { day: day.start, fetched_at: new Date(time).toISOString(), worker_requests: total(w?.allWorkers, 'requests'), site_requests: total(w?.site, 'requests'), site_errors: total(w?.site, 'errors'), d1_rows_read: total(d?.database, 'rowsRead'), d1_rows_written: total(d?.database, 'rowsWritten'), kv_reads: kvCount('read'), kv_writes: kvCount('write'), kv_deletes: kvCount('delete'), kv_lists: kvCount('list'), error: w && d && k ? null : 'Some Cloudflare analytics are unavailable. Check the token’s Account Analytics: Read permission and account access.' };
 }
 
 async function saveSetting(db: D1Database, key: string, value: string) {
@@ -84,7 +89,7 @@ async function cloudflareUsage(env: Cloudflare.Env, time: number) {
   let cached: CloudflareUsage | null = null;
   try { cached = raw ? JSON.parse(raw) : null; } catch { /* Refresh an invalid cache. */ }
   const sameDay = cached?.day === utcUsageDay(time).start;
-  if (cached && sameDay && time - Date.parse(cached.fetched_at) < CACHE_MS) return { connected: true, data: cached, stale: false };
+  if (cached && 'kv_lists' in cached && sameDay && time - Date.parse(cached.fetched_at) < CACHE_MS) return { connected: true, data: cached, stale: false };
   try {
     const data = await fetchCloudflareUsage(env, await openAnalyticsToken(env, token), time);
     await saveSetting(env.DB, CACHE_KEY, JSON.stringify(data));
@@ -117,6 +122,10 @@ export async function usageSummary(env: Cloudflare.Env, time = Date.now()) {
       rows_read: { ...quota(measured?.d1_rows_read ?? null, FREE_LIMITS.d1_rows_read), source: 'cloudflare' },
       rows_written: { ...quota(measured?.d1_rows_written ?? null, FREE_LIMITS.d1_rows_written), source: 'cloudflare' },
       storage: { ...quota(databaseBytes, FREE_LIMITS.database_bytes), source: 'database' },
+      kv_reads: { ...quota(measured?.kv_reads ?? null, FREE_LIMITS.kv_reads), source: 'cloudflare' },
+      kv_writes: { ...quota(measured?.kv_writes ?? null, FREE_LIMITS.kv_writes), source: 'cloudflare' },
+      kv_deletes: { ...quota(measured?.kv_deletes ?? null, FREE_LIMITS.kv_deletes), source: 'cloudflare' },
+      kv_lists: { ...quota(measured?.kv_lists ?? null, FREE_LIMITS.kv_lists), source: 'cloudflare' },
     },
   };
 }

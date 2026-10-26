@@ -33,7 +33,8 @@ try {
     assert.equal(body.variables.account, env.CLOUDFLARE_ACCOUNT_ID);
     const database = body.query.includes('DatabaseUsage');
     if (rejectProvider || database && rejectDatabase) return Response.json({ errors: [{ message: 'Synthetic provider failure' }] });
-    return Response.json({ data: { viewer: { accounts: [database ? { database: [{ sum: { rowsRead: 125000, rowsWritten: 4500 } }] } : { allWorkers: [{ sum: { requests: 85000 } }], site: [{ sum: { requests: 80000, errors: 12 } }] }] } } });
+    const kv = body.query.includes('KvUsage');
+    return Response.json({ data: { viewer: { accounts: [database ? { database: [{ sum: { rowsRead: 125000, rowsWritten: 4500 } }] } : kv ? { operations: ['read', 'write', 'delete', 'list'].map((actionType, index) => ({ dimensions: { actionType }, sum: { requests: [2100, 70, 20, 1000][index] } })) } : { allWorkers: [{ sum: { requests: 85000 } }], site: [{ sum: { requests: 80000, errors: 12 } }] }] } } });
   };
   await usage.connectUsage(env, token);
   const stored = await db.prepare("SELECT value FROM settings WHERE key = 'usage_cloudflare_token'").first();
@@ -45,6 +46,12 @@ try {
   assert.equal(first.quotas.requests.status, 'warning');
   assert.equal(first.quotas.rows_read.used, 125000);
   assert.equal(first.quotas.rows_written.used, 4500);
+  assert.equal(first.quotas.kv_reads.used, 2100);
+  assert.equal(first.quotas.kv_writes.remaining, 930);
+  assert.equal(first.quotas.kv_deletes.remaining, 980);
+  assert.equal(first.quotas.kv_lists.used, 1000);
+  assert.equal(first.quotas.kv_lists.remaining, 0);
+  assert.equal(first.quotas.kv_lists.status, 'exhausted');
   assert.equal(JSON.stringify(first).includes(token), false);
   assert.equal(JSON.stringify(first).includes(sealed), false);
   const called = calls;
@@ -71,6 +78,7 @@ try {
   assert.equal(unavailable.quotas.requests.used, null, 'Yesterday’s quota must not masquerade as today’s headroom');
   assert.equal(unavailable.quotas.rows_read.remaining, null);
   assert.equal(unavailable.quotas.rows_written.remaining, null);
+  assert.equal(unavailable.quotas.kv_lists.remaining, null);
   assert.equal(unavailable.cloudflare.data.worker_requests, null);
   assert.ok(unavailable.cloudflare.data.error);
   rejectProvider = false; rejectDatabase = true;

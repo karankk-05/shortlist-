@@ -9,7 +9,18 @@ const ownerHash = createHash('sha256').update(ownerKey).digest('hex');
 const signingKey = randomBytes(32), secret = 'whsec_' + signingKey.toString('base64');
 const received = [];
 let fetches = 0, failDeliveries = false, checks = 0;
-const bundled = await build({ entryPoints: ['worker/index.ts'], bundle: true, write: false, format: 'esm', platform: 'browser', external: ['cloudflare:workers', 'cloudflare:sockets'], logLevel: 'silent' });
+// The fixture-only route measures every scheduler KV call. Production has no
+// diagnostics route; the probe deliberately makes all KV listing fail.
+const bundled = await build({ stdin: { resolveDir: process.cwd(), contents: `
+  import worker from './worker/index.ts';
+  import { notifyQueue } from './lib/queue-runtime.ts';
+  export default { ...worker, async fetch(request, env, context) {
+    if (new URL(request.url).pathname !== '/__test_notify') return worker.fetch(request, env, context);
+    const counts = { reads: 0, lists: 0 }, kv = env.OAUTH_KV;
+    const guarded = { get(key, options) { counts.reads++; if (request.headers.get('X-Test-KV') === 'outage') throw new Error('synthetic KV outage'); return kv.get(key, options); }, list() { counts.lists++; throw new Error('KV list allowance exhausted'); } };
+    const result = await notifyQueue({ ...env, OAUTH_KV: guarded });
+    return Response.json({ ...result, kv: counts });
+  } };` }, bundle: true, write: false, format: 'esm', platform: 'browser', external: ['cloudflare:workers', 'cloudflare:sockets'], logLevel: 'silent' });
 const mf = new Miniflare({ modules: true, script: bundled.outputFiles[0].text, compatibilityDate: '2026-05-15', compatibilityFlags: ['global_fetch_strictly_public'], d1Databases: ['DB'], kvNamespaces: ['OAUTH_KV'], bindings: { ADMIN_KEY_SHA256: ownerHash, PORTAL_ORIGIN: origin, PUBLIC_CAMPUS_ONLY: 'true' }, serviceBindings: { ASSETS: () => new Response('<html></html>', { headers: { 'Content-Type': 'text/html' } }) }, outboundService: async request => {
   fetches++;
   const url = new URL(request.url);
@@ -43,6 +54,13 @@ try {
     const text = await response.text(), value = response.headers.get('Content-Type')?.includes('application/json') ? JSON.parse(text) : text;
     assert.equal(response.status, expected, `${method} ${path}: ${typeof value === 'object' ? JSON.stringify(value) : text.slice(0, 200)}`); checks++;
     return { value, response };
+  }
+  async function probeNotify(outage = false) {
+    const response = await mf.dispatchFetch(origin + '/__test_notify', { headers: outage ? { 'X-Test-KV': 'outage' } : {} });
+    assert.equal(response.status, 200); checks++;
+    const value = await response.json();
+    assert.equal(value.kv.lists, 0, 'No scheduler path may enumerate OAuth grants');
+    return value;
   }
   const scheduleBundle = await build({ entryPoints: ['lib/mail-schedule.ts'], bundle: true, write: false, format: 'esm', platform: 'browser', logLevel: 'silent' });
   const scheduler = await import('data:text/javascript;base64,' + Buffer.from(scheduleBundle.outputFiles[0].text).toString('base64'));
@@ -131,7 +149,14 @@ try {
   const subscribed = await mcp('events/subscribe', subParams('https://connectors.api.openai.com/queue-callback'));
   assert.ok(subscribed.result.id.startsWith('sub_'));
   assert.equal((await mcp('events/subscribe', subParams('https://connectors.api.openai.com/queue-callback'))).result.id, subscribed.result.id);
-  await call('/api/v1/automation/notify', { method: 'POST', owner: true, data: {} }); assert.equal(received.length, 0);
+  for (let tick = 0; tick < 3; tick++) assert.deepEqual((await probeNotify()).kv, { reads: 0, lists: 0 }, 'An empty healthy queue never touches OAuth');
+  assert.equal(received.length, 0);
+  await db.prepare("INSERT INTO settings (key, value) VALUES ('mail_automation_last_run', ?)").bind(JSON.stringify({ error: 'synthetic_sync_error', last_success_at: '2026-01-01T00:00:00Z' })).run();
+  assert.deepEqual((await probeNotify()).kv, { reads: 1, lists: 0 }, 'A collector failure can still notify the owner even if no jobs are queued');
+  assert.equal(received.at(-1).data.reason, 'sync_error');
+  await db.prepare("DELETE FROM settings WHERE key = 'mail_automation_last_run'").run();
+  assert.deepEqual((await probeNotify()).kv, { reads: 0, lists: 0 });
+  received.length = 0;
   const raw = ['From: synthetic@example.invalid', 'To: owner@example.invalid', 'Subject: Synthetic shortlist event fixture', 'Message-ID: <synthetic-events-fixture@example.invalid>', 'Date: Sun, 25 Oct 2026 10:00:00 +0000', 'Content-Type: text/plain; charset=utf-8', '', 'Synthetic candidate table for a local test only.', 'Synthetic Example A 230001', 'Synthetic Example B 230002'].join('\r\n');
   failDeliveries = true;
   const job = (await call('/api/v1/mail/import', { method: 'POST', owner: true, raw, expected: 201 })).value;
@@ -143,14 +168,16 @@ try {
     await new Promise(resolve => setTimeout(resolve, 20));
   }
   assert.equal(retry.status, 'pending'); assert.equal(retry.last_status, 503); assert.equal(received.length, 0);
+  assert.deepEqual((await probeNotify()).kv, { reads: 0, lists: 0 }, 'A future retry requires no authorization check until it is due');
   failDeliveries = false;
   await db.prepare('UPDATE agent_deliveries SET next_attempt_at = ? WHERE id = ?').bind('2000-01-01T00:00:00.000Z', retry.id).run();
-  await call('/api/v1/automation/notify', { method: 'POST', owner: true, data: {} });
+  assert.deepEqual((await probeNotify()).kv, { reads: 1, lists: 0 }, 'A due notification checks exactly its own live grant, even when KV listing is blocked');
   for (let n = 0; n < 30 && received.length < 1; n++) await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(received.length, 1); assert.equal(received[0].data.actionable_count, 1);
   assert.equal(received[0].eventId, retry.id, 'Receipt retries preserve the event ID');
   assert.equal(JSON.stringify(received[0]).includes('Synthetic'), false, 'Event payload never includes source content or students');
-  await call('/api/v1/automation/notify', { method: 'POST', owner: true, data: {} }); assert.equal(received.length, 1, 'Unchanged queue does not wake the agent again');
+  assert.deepEqual((await probeNotify()).kv, { reads: 0, lists: 0 }, 'An unchanged delivered queue does not recheck OAuth');
+  assert.equal(received.length, 1, 'Unchanged queue does not wake the agent again');
   const claimed = JSON.parse((await tool('portal_write', { path: `mail-jobs/${job.id}/claim`, body: {} })).content[0].text);
   assert.ok(claimed.lease_token);
   const processing = JSON.parse((await tool('queue_status')).content[0].text); assert.equal(processing.actionable_count, 0); assert.equal(processing.processing_count, 1);
@@ -165,6 +192,28 @@ try {
   assert.deepEqual(published.rows, rows); assert.equal(published.shortlist.role, 'Unknown'); assert.match(published.shortlist.added_at, /^2026-10-25T10:00:00/);
   await tool('portal_write', { path: `mail-jobs/${job.id}/complete`, body: { lease_token: claimed.lease_token, note: 'Published and publicly verified both synthetic source candidates with preserved CPI and order.' } });
   assert.equal((await db.prepare('SELECT status FROM mail_jobs WHERE id = ?').bind(job.id).first()).status, 'done');
+  const storedSub = await db.prepare('SELECT * FROM agent_subscriptions WHERE id = ?').bind(subscribed.result.id).first();
+  const kv = await mf.getKVNamespace('OAUTH_KV'), grantStorageKey = `grant:${storedSub.user_id}:${storedSub.grant_id}`;
+  const storedGrant = await kv.get(grantStorageKey);
+  assert.ok(storedGrant, 'The pinned OAuth provider writes the grant read by the adapter');
+  await db.prepare("UPDATE mail_jobs SET status = 'pending', updated_at = ? WHERE id = ?").bind(new Date(Date.now() + 1000).toISOString(), job.id).run();
+  assert.deepEqual((await probeNotify(true)).kv, { reads: 1, lists: 0 });
+  const outageDelivery = await db.prepare("SELECT id, status, last_error FROM agent_deliveries WHERE status = 'pending' ORDER BY created_at DESC LIMIT 1").first();
+  assert.equal(outageDelivery.last_error, 'subscription_check_unavailable');
+  assert.equal((await db.prepare('SELECT revoked_at FROM agent_subscriptions WHERE id = ?').bind(storedSub.id).first()).revoked_at, null, 'A storage outage must not revoke a valid connection');
+  assert.equal(received.length, 1);
+  await kv.delete(grantStorageKey);
+  await db.prepare('UPDATE agent_deliveries SET next_attempt_at = ? WHERE id = ?').bind('2000-01-01T00:00:00Z', outageDelivery.id).run();
+  assert.deepEqual((await probeNotify()).kv, { reads: 1, lists: 0 });
+  assert.equal((await db.prepare('SELECT status FROM agent_deliveries WHERE id = ?').bind(outageDelivery.id).first()).status, 'dead', 'A revoked grant cannot receive a retry');
+  assert.ok((await db.prepare('SELECT revoked_at FROM agent_subscriptions WHERE id = ?').bind(storedSub.id).first()).revoked_at);
+  assert.equal(received.length, 1);
+  await kv.put(grantStorageKey, storedGrant);
+  await db.prepare('UPDATE agent_subscriptions SET revoked_at = NULL WHERE id = ?').bind(storedSub.id).run();
+  await db.prepare("UPDATE mail_jobs SET status = 'done' WHERE id = ?").bind(job.id).run();
+  await db.prepare("UPDATE agent_deliveries SET status = 'pending', next_attempt_at = ? WHERE id = ?").bind('2000-01-01T00:00:00Z', outageDelivery.id).run();
+  assert.deepEqual((await probeNotify()).kv, { reads: 0, lists: 0 });
+  assert.equal((await db.prepare('SELECT last_error FROM agent_deliveries WHERE id = ?').bind(outageDelivery.id).first()).last_error, 'queue_empty', 'Completed work cancels obsolete retries without consulting OAuth');
   await mcp('events/unsubscribe', subParams('https://connectors.api.openai.com/queue-callback'));
   assert.ok((await db.prepare('SELECT revoked_at FROM agent_subscriptions WHERE id = ?').bind(subscribed.result.id).first()).revoked_at);
   const secondJob = (await call('/api/v1/mail/import', { method: 'POST', owner: true, raw: raw.replace('synthetic-events-fixture@', 'synthetic-second-fixture@'), expected: 201 })).value;
@@ -177,5 +226,5 @@ try {
   await mcp('tools/list', {}, 401);
   await call('/oauth/token', { method: 'POST', form: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: token.refresh_token, client_id: client.client_id, resource: origin + '/mcp' }), expected: 400 });
   await call('/oauth/token', { method: 'POST', form: tokenParams, expected: 400 });
-  console.log(JSON.stringify({ passed: true, checks, synthetic_only: true, event_deliveries: received.length, verified: ['OAuth PKCE and single-use code', 'browser-bound single-use consent', 'ChatGPT-only redirect allowlist', 'private MCP authentication and scopes', 'restricted agent writes', 'signed callback verification', 'redirect refusal', 'idempotent subscriptions', 'empty queue silence', '503 delivery retry with stable event ID', 'one event per changed queue', 'live-claim exclusion', 'MCP master lookup, evidence, draft, publication and completion', 'public source order, missing CPI, Unknown role and receipt date', 'unsubscribe', 'owner revocation and refresh denial'] }, null, 2));
+  console.log(JSON.stringify({ passed: true, checks, synthetic_only: true, event_deliveries: received.length, verified: ['OAuth PKCE and single-use code', 'browser-bound single-use consent', 'ChatGPT-only redirect allowlist', 'private MCP authentication and scopes', 'restricted agent writes', 'signed callback verification', 'redirect refusal', 'idempotent subscriptions', 'empty queue silence with zero OAuth calls', 'no KV listing during scheduler ticks or delivery', 'one direct grant read per due delivery', 'collector error notification', 'transient auth-storage failures preserve subscriptions', 'revoked grants block retries', 'obsolete retries need no OAuth calls', '503 delivery retry with stable event ID', 'one event per changed queue', 'live-claim exclusion', 'MCP master lookup, evidence, draft, publication and completion', 'public source order, missing CPI, Unknown role and receipt date', 'unsubscribe', 'owner revocation and refresh denial'] }, null, 2));
 } finally { await mf.dispose(); }
