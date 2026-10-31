@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from 'react';
 import { ArrowRight, Eye, EyeOff, LoaderCircle, Search, RotateCcw, UserRound } from 'lucide-react';
 import type { StudentEvent, StudentProfile, StudentSearchResponse } from '../lib/student-directory';
-import { groupShortlists } from '../lib/shortlist-groups';
+import { groupShortlists, roundCategories } from '../lib/shortlist-groups';
 
 type Reader = <T = any>(path: string, options?: RequestInit) => Promise<T>;
 function follow(event: MouseEvent<HTMLAnchorElement>, action: () => void) {
@@ -48,6 +48,7 @@ function StudentCompanies({ events, onOpen, possible = false }: { events: Studen
 
 export function StudentProfilePage({ roll, request, onOpen }: { roll: string; request: Reader; onOpen: (id: string) => void }) {
   const [result, setResult] = useState<{ roll: string; data?: StudentProfile; error?: string } | null>(null), [attempt, setAttempt] = useState(0), [showCpi, setShowCpi] = useState(false);
+  const [round, setRound] = useState(() => new URLSearchParams(location.search).get('round') || '');
   useEffect(() => {
     const controller = new AbortController(); setShowCpi(false);
     request<StudentProfile>('students/' + encodeURIComponent(roll), { signal: controller.signal })
@@ -56,12 +57,24 @@ export function StudentProfilePage({ roll, request, onOpen }: { roll: string; re
     return () => controller.abort();
   }, [roll, request, attempt]);
   const data = result?.roll === roll ? result.data : undefined, error = result?.roll === roll ? result.error : undefined;
+  const rounds = useMemo(() => groupShortlists(data ? [...data.confirmed, ...data.possible] : []).round_categories, [data]);
+  const selectedRound = rounds.includes(round) ? round : '';
+  const matchesRound = (event: StudentEvent) => !selectedRound || roundCategories(event.round).includes(selectedRound);
+  const confirmed = data?.confirmed.filter(matchesRound) || [], possible = data?.possible.filter(matchesRound) || [];
+  const companyCount = groupShortlists([...confirmed, ...possible]).company_groups.length;
+  function changeRound(value: string) {
+    setRound(value);
+    const url = new URL(location.href);
+    if (value) url.searchParams.set('round', value); else url.searchParams.delete('round');
+    history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+  }
   if (!data) return error ? <section className="panel cardbody"><p className="notice error" role="alert">{error}</p><button className="secondary" onClick={() => { setResult(null); setAttempt(value => value + 1); }}><RotateCcw size={14} />Try again</button></section> : <section className="panel shortlist-loading" role="status" aria-busy="true"><LoaderCircle size={25} className="spinner" />Loading student shortlists…</section>;
   return <>
     <div className="heading-row"><div><div className="eyebrow">STUDENT SHORTLISTS</div><h1>{data.student.name || roll}</h1><p className="lede">{data.student.roll} · {data.student.programme || '—'}</p></div><button className="secondary" aria-pressed={showCpi} aria-label={`${showCpi ? 'Hide' : 'Show'} student CPI`} onClick={() => setShowCpi(value => !value)}>{showCpi ? <EyeOff size={14} /> : <Eye size={14} />}{showCpi ? 'Hide CPI' : 'Show CPI'}</button></div>
     <section className="panel student-profile-info" aria-label="Student information"><dl><div><dt>Programme</dt><dd>{data.student.programme || '—'}</dd></div><div><dt>Branch</dt><dd>{data.student.branch || '—'}</dd></div><div><dt>CPI</dt><dd className={showCpi ? '' : 'cpi-hidden'}>{showCpi ? data.student.cpi === null ? '—' : data.student.cpi : '...'}</dd></div><div><dt>Email</dt><dd>{data.student.email || '—'}</dd></div></dl></section>
-    <section className="stats" aria-label="Student shortlist statistics" style={{ gridTemplateColumns: `repeat(${data.possible.length ? 3 : 2}, minmax(0, 1fr))` }}><div className="stat"><div><div className="stat-number">{data.company_count}</div><span className="stat-label">Companies</span></div></div><div className="stat"><div><div className="stat-number">{data.confirmed.length}</div><span className="stat-label">Confirmed shortlists</span></div></div>{!!data.possible.length && <div className="stat"><div><div className="stat-number">{data.possible.length}</div><span className="stat-label">Unconfirmed shortlist matches</span></div></div>}</section>
-    <div className="student-profile-section"><h2>Confirmed shortlists</h2>{data.confirmed.length ? <StudentCompanies events={data.confirmed} onOpen={onOpen} /> : <p className="muted student-profile-empty">No confirmed shortlist entries.</p>}</div>
-    {!!data.possible.length && <div className="student-profile-section student-profile-possible"><h2>Possible matches</h2><p className="student-profile-caption">You could be one of the possible candidates in these shortlists.</p><StudentCompanies events={data.possible} onOpen={onOpen} possible /></div>}
+    <div className="student-round-filter"><label className="filter-control">Round<select aria-label="Filter student shortlists by round" value={selectedRound} onChange={event => changeRound(event.target.value)}><option value="">All rounds</option>{rounds.map(value => <option key={value} value={value}>{value}</option>)}</select></label>{selectedRound && <button className="secondary" onClick={() => changeRound('')}><RotateCcw size={13} />All rounds</button>}<span className="muted" role="status" aria-live="polite">Showing {confirmed.length + possible.length} of {data.confirmed.length + data.possible.length} shortlists{selectedRound ? ` · ${selectedRound}` : ''}</span></div>
+    <section className="stats" aria-label="Student shortlist statistics" style={{ gridTemplateColumns: `repeat(${possible.length ? 3 : 2}, minmax(0, 1fr))` }}><div className="stat"><div><div className="stat-number">{companyCount}</div><span className="stat-label">Companies</span></div></div><div className="stat"><div><div className="stat-number">{confirmed.length}</div><span className="stat-label">Confirmed shortlists</span></div></div>{!!possible.length && <div className="stat"><div><div className="stat-number">{possible.length}</div><span className="stat-label">Unconfirmed shortlist matches</span></div></div>}</section>
+    <div className="student-profile-section"><h2>Confirmed shortlists</h2>{confirmed.length ? <StudentCompanies events={confirmed} onOpen={onOpen} /> : <p className="muted student-profile-empty">{selectedRound ? 'No confirmed shortlists in this round.' : 'No confirmed shortlist entries.'}</p>}</div>
+    {!!possible.length && <div className="student-profile-section student-profile-possible"><h2>Possible matches</h2><p className="student-profile-caption">You could be one of the possible candidates in these shortlists.</p><StudentCompanies events={possible} onOpen={onOpen} possible /></div>}
   </>;
 }

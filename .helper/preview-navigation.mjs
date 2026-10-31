@@ -6,7 +6,7 @@ import { groupShortlists } from '../lib/shortlist-groups.ts';
 // Local UI fixture: synthetic records and deliberately slow detail requests only.
 const root = resolve(new URL('../dist/', import.meta.url).pathname);
 const listing = (id, company, round = 'Technical Test', role = 'Analyst', day = 1) => ({ id, company, role, round, season: '2026', notes: '', published_version_id: 'synthetic-version', row_count: 1, unresolved_count: 0, added_at: `2026-10-${String(day).padStart(2, '0')}T00:00:00Z`, updated_at: '2026-10-25T00:00:00Z', version_number: 1, version_count: 1 });
-const lists = [...Array.from({ length: 18 }, (_, i) => listing(`sample-${i}`, `Sample Company ${i + 1}`, 'Technical Test', 'Analyst', 25 - i)), listing('example-test', 'Example Company'), listing('example-oa', 'Example Company', 'Online Aptitude Test'), listing('example-interview', 'Example Company', 'Interview', 'Engineer')];
+const lists = [...Array.from({ length: 18 }, (_, i) => listing(`sample-${i}`, `Sample Company ${i + 1}`, 'Technical Test', 'Analyst', 25 - i)), listing('example-test', 'Example Company'), listing('example-oa', 'Example Company', 'Online Aptitude Test'), listing('example-interview', 'Example Company', 'Group Discussion / Interview', 'Engineer')];
 const json = (response, status, value) => { response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); response.end(JSON.stringify(value)); };
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1:8791');
