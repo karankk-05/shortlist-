@@ -15,7 +15,7 @@ export function requestCategory(request: Request): UsageCategory {
   const { pathname: path } = new URL(request.url);
   if (path === '/mcp' || path.startsWith('/mcp/')) return 'agent';
   if (path.startsWith('/oauth/') || path.startsWith('/.well-known/') || /^\/api\/v1\/(session|me)(\/|$)/.test(path)) return 'auth';
-  if (/^\/api\/v1\/shortlists(\/|$)/.test(path)) return ['GET', 'HEAD'].includes(request.method) ? 'shortlist_reads' : 'shortlist_writes';
+  if (/^\/api\/v1\/(shortlists|students)(\/|$)/.test(path)) return ['GET', 'HEAD'].includes(request.method) ? 'shortlist_reads' : 'shortlist_writes';
   if (/^\/api\/v1\/(mail|mail-jobs|queue-status|automation)(\/|$)/.test(path)) return 'mail';
   if (/^\/api\/v1\/(master(?:\.csv)?|uploads|keys|usage)(\/|$)/.test(path) || path.startsWith('/gate/')) return 'owner';
   if (path.startsWith('/api/')) return 'other';

@@ -17,6 +17,7 @@ const checks = [
   ['/', 403], ['/index.html', 403], ['/unknown-network-test-route', 403],
   ['/api/v1/shortlists', 403], ['/api/v1/shortlists/network-test', 403],
   ['/api/v1/shortlists/network-test/export.csv', 403],
+  ['/students/230001', 403], ['/api/v1/students?q=network-test', 403], ['/api/v1/students/230001', 403],
   ['/.well-known/oauth-authorization-server', 200], ['/.well-known/oauth-protected-resource/mcp', 200],
   ['/mcp', 401], ['/shortlist-plugin.png', 200], ['/upload', 200],
 ];

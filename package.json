@@ -10,7 +10,7 @@
     "dev": "npm run build && wrangler d1 migrations apply DB --local && wrangler dev --local --port 8787",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test .helper/records.test.mjs .helper/student-view.test.mjs .helper/mail.test.mjs .helper/shortlist-groups.test.mjs .helper/identity-review.test.mjs .helper/library-view.test.mjs .helper/campus-network.test.mjs .helper/usage.test.mjs .helper/oauth-grant.test.mjs",
+    "test": "node --experimental-strip-types --test .helper/records.test.mjs .helper/student-view.test.mjs .helper/mail.test.mjs .helper/shortlist-groups.test.mjs .helper/identity-review.test.mjs .helper/library-view.test.mjs .helper/campus-network.test.mjs .helper/usage.test.mjs .helper/oauth-grant.test.mjs .helper/student-directory.test.mjs",
     "test:integration": "node .helper/integration.mjs",
     "test:events": "node .helper/events.integration.mjs",
     "test:usage": "node .helper/usage.integration.mjs",

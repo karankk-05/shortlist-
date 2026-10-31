@@ -12,13 +12,22 @@ const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1:8791');
   if (url.pathname === '/api/v1/me') return json(response, 200, { role: 'public', label: null, owner_configured: true });
   if (url.pathname === '/api/v1/shortlists') return json(response, 200, { shortlists: lists, ...groupShortlists(lists) });
+  const student = { name: 'Example Student', roll: '230001', programme: 'BTech', branch: 'Example Engineering', cpi: 8.37, email: 'example23@example.invalid' };
+  if (url.pathname === '/api/v1/students') {
+    const { cpi: _cpi, ...summary } = student;
+    return json(response, 200, { query: url.searchParams.get('q'), students: [{ student: summary, confirmed_count: 2, possible_count: 1 }], has_more: false, next_offset: null });
+  }
+  if (url.pathname === '/api/v1/students/230001') {
+    await new Promise(resolve => setTimeout(resolve, 300));
+    return json(response, 200, { student, confirmed: lists.filter(row => ['example-test', 'example-interview'].includes(row.id)).map(row => ({ ...row, match: 'confirmed', round_categories: [row.round] })), possible: [{ ...lists[0], match: 'possible', round_categories: ['Test'] }], company_count: 2 });
+  }
   if (url.pathname.startsWith('/api/v1/shortlists/')) {
     await new Promise(done => setTimeout(done, 2500));
     const shortlist = lists.find(list => list.id === url.pathname.split('/').at(-1));
     return shortlist ? json(response, 200, { shortlist, rows: [{ name: 'Example Student', roll: '230001', programme: 'BTech', branch: 'Example department', cpi: 8, email: 'student@example.test' }], unresolved_candidates: [], version: { id: 'synthetic-version', number: 1, row_count: 1, unresolved_count: 0 } }) : json(response, 404, { error: 'Shortlist not found.' });
   }
   if (url.pathname.startsWith('/api/')) return json(response, 404, { error: 'Not found.' });
-  const file = resolve(root, url.pathname === '/' ? 'index.html' : '.' + url.pathname);
+  const file = resolve(root, url.pathname === '/' || url.pathname.startsWith('/students/') ? 'index.html' : '.' + url.pathname);
   if (!file.startsWith(root + '/')) { response.writeHead(404); response.end(); return; }
   try {
     const bytes = await readFile(file);

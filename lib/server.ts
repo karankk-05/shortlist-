@@ -12,6 +12,7 @@ import { queueStatus } from './queue-runtime';
 import { mailSchedule, validateSyncInterval, MIN_SYNC_INTERVAL, MAX_SYNC_INTERVAL } from './mail-schedule';
 import { campusAccessDenied, campusRestrictionEnabled, isIitkNetwork } from './campus-network';
 import { connectUsage, disconnectUsage, usageSummary } from './usage-service';
+import { buildStudentProfile, directoryQuery, indexStudentVersion, searchExpression, searchTokens, type StudentSearchResult } from './student-directory';
 
 type Actor = { role: 'admin' | 'uploader'; id: string; label: string };
 type List = { id: string; company: string; role: string; round: string; season: string; notes: string; published_version_id: string | null; created_at: string; updated_at: string };
@@ -185,6 +186,9 @@ async function publish(request: Request, listId: string, restore = false) {
   if (restore && !version.published_at) throw new InputError('Restore an already-published version.');
   const warnings = JSON.parse(version.warnings);
   if (warnings.some((warning: { issues: string[] }) => warning.issues.some(issue => issue !== 'unresolved_identity')) && input.acknowledge_warnings !== true) throw new InputError('Review the draft warnings and set acknowledge_warnings to true before publication.');
+  // Prepare the public search projection before changing the publication pointer.
+  // Search always joins the live pointer, so private/new/stale versions stay hidden.
+  if (!await db().prepare('SELECT version_id FROM student_search_versions WHERE version_id = ?').bind(version.id).first()) await indexStudentVersion(db(), version.id, publicShortlistData(await versionData(version), list));
   const time = now();
   const [changed] = await db().batch([
     db().prepare('UPDATE shortlists SET published_version_id = ?, updated_at = ? WHERE id = ? AND published_version_id IS ? AND deleted_at IS NULL').bind(version.id, time, listId, list.published_version_id),
@@ -223,7 +227,46 @@ export async function handle(request: Request): Promise<Response> {
       if (method === 'DELETE' && item === 'cloudflare' && !action) return json(await disconnectUsage(db()));
       throw new InputError('Usage endpoint not found.', 404);
     }
-    if (resource === 'shortlists' && ['GET', 'HEAD'].includes(method) && campusRestrictionEnabled(env) && !isIitkNetwork(request) && !await actor(request)) return campusAccessDenied();
+    if (['shortlists', 'students'].includes(resource) && ['GET', 'HEAD'].includes(method) && campusRestrictionEnabled(env) && !isIitkNetwork(request) && !await actor(request)) return campusAccessDenied();
+    if (resource === 'student-index' && method === 'POST' && !item) {
+      await access(request, true);
+      const missing = await db().prepare('SELECT s.id, s.published_version_id FROM shortlists s LEFT JOIN student_search_versions i ON i.version_id = s.published_version_id WHERE s.deleted_at IS NULL AND s.published_version_id IS NOT NULL AND i.version_id IS NULL LIMIT 3').all<{ id: string; published_version_id: string }>();
+      for (const row of missing.results) {
+        const list = await findList(row.id), version = await findVersion(row.published_version_id, row.id);
+        await indexStudentVersion(db(), version.id, publicShortlistData(await versionData(version), list));
+      }
+      const remaining = await db().prepare('SELECT count(*) AS count FROM shortlists s LEFT JOIN student_search_versions i ON i.version_id = s.published_version_id WHERE s.deleted_at IS NULL AND s.published_version_id IS NOT NULL AND i.version_id IS NULL').first<{ count: number }>();
+      return json({ indexed: missing.results.length, remaining: remaining?.count || 0 });
+    }
+    if (resource === 'students' && method === 'GET' && !action) {
+      // All rows come from the current, non-deleted published versions. No master
+      // fallback, private notes, draft versions, or hidden alternatives are read.
+      const publishedEvents = `SELECT s.id, s.company, s.role, s.round, s.season, v.id AS version_id, ${listAddedAt} AS added_at FROM shortlists s JOIN versions v ON v.id = s.published_version_id LEFT JOIN mail_jobs m ON m.id = v.source_mail_job_id WHERE s.deleted_at IS NULL`;
+      if (item) {
+        const roll = string(item, 'Roll', 40, true);
+        const result = await db().prepare(`SELECT i.row_data, i.kind, e.* FROM student_search_entries i JOIN (${publishedEvents}) e ON e.version_id = i.version_id WHERE i.roll = ? ORDER BY added_at DESC`).bind(roll).all<Parameters<typeof buildStudentProfile>[0][number]>();
+        const profile = buildStudentProfile(result.results);
+        if (!profile) throw new InputError('No published shortlists found for this student.', 404);
+        return json(profile);
+      }
+      const query = directoryQuery(string(url.searchParams.get('q') || '', 'Student search', 160));
+      if (query.length < 2) return json({ students: [], query, has_more: false, next_offset: null });
+      const offsetText = url.searchParams.get('offset') || '0';
+      if (!/^\d{1,7}$/.test(offsetText)) throw new InputError('Invalid search offset.');
+      const offset = Number(offsetText), tokens = searchTokens(query);
+      const matches = tokens.map(() => "lower(i.name || ' ' || i.roll || ' ' || i.email || ' ' || i.source_name) LIKE ? ESCAPE '\\'").join(' AND ');
+      const result = await db().prepare(`WITH events AS MATERIALIZED (${publishedEvents}), matched AS MATERIALIZED (
+        SELECT DISTINCT i.roll FROM student_search_terms JOIN student_search_entries i ON i.rowid = student_search_terms.rowid JOIN events e ON e.version_id = i.version_id
+        WHERE student_search_terms MATCH ? AND ${matches}
+      ), visible AS MATERIALIZED (SELECT i.*, e.added_at FROM student_search_entries i JOIN matched t ON t.roll = i.roll JOIN events e ON e.version_id = i.version_id), people AS (
+        SELECT i.roll, count(DISTINCT CASE WHEN i.kind = 'confirmed' THEN i.version_id END) AS confirmed_count,
+          count(DISTINCT i.version_id) - count(DISTINCT CASE WHEN i.kind = 'confirmed' THEN i.version_id END) AS possible_count
+        FROM visible i GROUP BY i.roll
+      ) SELECT p.*, (SELECT row_data FROM visible i WHERE i.roll = p.roll ORDER BY CASE WHEN kind = 'confirmed' THEN 0 ELSE 1 END, added_at DESC, version_id LIMIT 1) AS row_data
+      FROM people p ORDER BY CASE WHEN lower(p.roll) = lower(?) THEN 0 WHEN lower(json_extract(row_data, '$.name')) = lower(?) THEN 1 ELSE 2 END, lower(json_extract(row_data, '$.name')), p.roll LIMIT 26 OFFSET ?`).bind(searchExpression(query), ...tokens, query, query, offset).all<{ roll: string; confirmed_count: number; possible_count: number; row_data: string }>();
+      const students: StudentSearchResult[] = result.results.slice(0, 25).map(row => { const { cpi: _cpi, ...student } = JSON.parse(row.row_data) as StudentRow; return { student, confirmed_count: row.confirmed_count, possible_count: row.possible_count }; });
+      return json({ students, query, has_more: result.results.length > 25, next_offset: result.results.length > 25 ? offset + 25 : null });
+    }
     if (method === 'GET' && resource === 'health') return json({ status: 'ok', service: 'shortlist-desk', version: 1, merging: 'external-agent' });
     if (method === 'GET' && resource === 'agent') return plain(agentGuide(url.origin), 'text/markdown; charset=utf-8');
     if (method === 'GET' && resource === 'mail-agent') return plain(mailGuide(url.origin), 'text/markdown; charset=utf-8');
@@ -456,6 +499,8 @@ function openapi(origin: string) {
   const mailAction = bodySchema({ type: 'object', required: ['lease_token'], properties: { lease_token: { type: 'string' }, note: { type: 'string' } } });
   return { openapi: '3.1.0', info: { title: 'Shortlist Desk', version: '1.0.0', description: 'Gemini performs interpretation and merging. The portal validates, stores and publishes exact six-column results.' }, servers: [{ url: origin + '/api/v1' }], components: { securitySchemes: { UploaderKey: { type: 'http', scheme: 'bearer', description: 'Revocable uploader key issued by the owner.' }, OwnerKey: { type: 'http', scheme: 'bearer', description: 'Private owner key. Uploader keys cannot delete or restore shortlists.' } }, schemas: { Student: student } }, paths: {
     '/health': { get: { operationId: 'health', summary: 'Health check', responses: response } },
+    '/students': { get: { operationId: 'searchStudents', summary: 'Campus-only student search across current published shortlists; no private master records', parameters: [{ name: 'q', in: 'query', schema: { type: 'string', minLength: 2, maxLength: 160 } }, { name: 'offset', in: 'query', schema: { type: 'integer', minimum: 0 } }], responses: response } },
+    '/students/{roll}': { get: { operationId: 'studentShortlists', summary: 'Campus-only profile with confirmed shortlists and separately labelled possible matches', parameters: [{ name: 'roll', in: 'path', required: true, schema: { type: 'string' } }], responses: response } },
     '/mail-agent': { get: { operationId: 'mailAgentGuide', summary: 'Public workflow instructions without mailbox data', responses: response } },
     '/mail/status': { get: { operationId: 'mailStatus', summary: 'Private mailbox connection state and configuration; never returns the password', security: secured, responses: response } },
     '/mail/config': { put: { operationId: 'configureMail', summary: 'Owner only: mailbox folder, lookback, sender and link-domain rules', security: ownerOnly, requestBody: bodySchema({ type: 'object', required: ['enabled','folder','lookback_days','senders','link_domains'], properties: { enabled: { type: 'boolean' }, folder: { type: 'string' }, lookback_days: { type: 'integer', minimum: 1, maximum: 365 }, senders: { type: 'array', items: { type: 'string' } }, link_domains: { type: 'array', items: { type: 'string' } } } }), responses: response } },

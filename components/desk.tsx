@@ -12,6 +12,7 @@ import ThemeToggle from './theme-toggle';
 import Collapsible from './collapsible';
 import { readLibraryView, saveLibraryView } from '@/lib/library-view';
 import UsagePanel from './usage-summary';
+import { StudentSearch, StudentProfilePage, studentProfileRoll } from './student-directory';
 
 type View = 'library' | 'upload' | 'guide' | 'admin' | 'mail';
 type Session = { role: 'public' | 'uploader' | 'admin'; label: string | null; owner_configured: boolean; owner_entry_path?: string | null };
@@ -173,6 +174,7 @@ export default function Desk({ initialView }: { initialView: View }) {
   const [lists, setLists] = useState<Listing[]>([]), [loading, setLoading] = useState(true), [error, setError] = useState('');
   const [companyGroups, setCompanyGroups] = useState<CompanyGroup<Listing>[]>([]), [roundCategories, setRoundCategories] = useState<string[]>([]);
   const [selectedId, setSelectedId] = useState(() => initialView === 'library' ? new URLSearchParams(location.search).get('list') || null : null);
+  const [selectedStudent, setSelectedStudent] = useState(() => initialView === 'library' ? studentProfileRoll(location.pathname) : null);
   const [detailResult, setDetailResult] = useState<{ id: string; data?: ShortlistDetail; error?: string } | null>(null);
   const [detailAttempt, setDetailAttempt] = useState(0);
   const [libraryView, setLibraryView] = useState(readLibraryView);
@@ -195,17 +197,20 @@ export default function Desk({ initialView }: { initialView: View }) {
     return () => controller.abort();
   }, [selectedId, detailAttempt]);
   useEffect(() => { saveLibraryView({ ...libraryView, scrollY: libraryScroll.current }); }, [libraryView]);
-  const navigateLibrary = useCallback((id: string | null, push = true) => {
-    if (initialView !== 'library' || id === selectedId) return;
-    if (!selectedId) {
+  const navigatePage = useCallback((id: string | null, student: string | null, push = true) => {
+    if (initialView !== 'library' || id === selectedId && student === selectedStudent) return;
+    if (!selectedId && !selectedStudent) {
       libraryScroll.current = window.scrollY;
       saveLibraryView({ ...libraryView, scrollY: libraryScroll.current });
     }
-    if (push && selectedId !== id) history.pushState(null, '', id ? '/?list=' + encodeURIComponent(id) : '/');
+    if (push) history.pushState(null, '', student ? '/students/' + encodeURIComponent(student) : id ? '/?list=' + encodeURIComponent(id) : '/');
     setDetailResult(null);
     setSelectedId(id);
-    if (id) window.scrollTo(0, 0);
-  }, [initialView, selectedId, libraryView]);
+    setSelectedStudent(student);
+    if (id || student) window.scrollTo(0, 0);
+  }, [initialView, selectedId, selectedStudent, libraryView]);
+  const navigateLibrary = useCallback((id: string | null) => navigatePage(id, null), [navigatePage]);
+  const navigateStudent = useCallback((roll: string) => navigatePage(null, roll), [navigatePage]);
   useEffect(() => {
     if (initialView !== 'library') return;
     const previous = history.scrollRestoration;
@@ -214,18 +219,18 @@ export default function Desk({ initialView }: { initialView: View }) {
   }, [initialView]);
   useEffect(() => {
     if (initialView !== 'library') return;
-    const pop = () => navigateLibrary(new URLSearchParams(location.search).get('list') || null, false);
-    const remember = () => saveLibraryView({ ...libraryView, scrollY: selectedId ? libraryScroll.current : window.scrollY });
+    const pop = () => { const student = studentProfileRoll(location.pathname); navigatePage(student ? null : new URLSearchParams(location.search).get('list') || null, student, false); };
+    const remember = () => saveLibraryView({ ...libraryView, scrollY: selectedId || selectedStudent ? libraryScroll.current : window.scrollY });
     window.addEventListener('popstate', pop);
     window.addEventListener('pagehide', remember);
     return () => { window.removeEventListener('popstate', pop); window.removeEventListener('pagehide', remember); };
-  }, [initialView, navigateLibrary, libraryView, selectedId]);
+  }, [initialView, navigatePage, libraryView, selectedId, selectedStudent]);
   useLayoutEffect(() => {
-    if (initialView !== 'library' || selectedId || loading) return;
+    if (initialView !== 'library' || selectedId || selectedStudent || loading) return;
     const position = libraryScroll.current;
     const frame = requestAnimationFrame(() => window.scrollTo(0, position));
     return () => cancelAnimationFrame(frame);
-  }, [initialView, selectedId, loading]);
+  }, [initialView, selectedId, selectedStudent, loading]);
   function openLibrary(event: MouseEvent<HTMLAnchorElement>) {
     if (initialView !== 'library' || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault(); navigateLibrary(null);
@@ -250,18 +255,23 @@ export default function Desk({ initialView }: { initialView: View }) {
       {authorised ? <div className="breadcrumbs"><span>Workspace</span><ChevronRight size={11} /><strong>{labels[initialView]}</strong></div> : brand}
       <div className="top-actions"><ThemeToggle />{authorised && <button className="quiet" onClick={async () => { try { await api('session', { method: 'DELETE' }); await refresh(); } catch (error) { setError((error as Error).message); } }}><LogOut size={13} />Log out</button>}</div>
     </header><main className="content">{error && <Alert message={error} />}
-      {initialView === 'library' && <div className="library-view" hidden={Boolean(selectedId)}>
+      {initialView === 'library' && <div className="library-view" hidden={Boolean(selectedId || selectedStudent)}>
         {heading('Company shortlists', '', '', authorised ? <a href="/upload" className="primary"><Upload size={14} />Upload shortlist</a> : undefined)}
         <section className="stats" aria-label="Library statistics">
           <div className="stat"><span className="stat-icon"><FolderOpen size={19} /></span><div><div className="stat-number">{loading ? '—' : format(lists.length)}</div><span className="stat-label">Published shortlists</span></div></div>
           <div className="stat"><span className="stat-icon"><Files size={19} /></span><div><div className="stat-number">{loading ? '—' : format(lists.reduce((sum, list) => sum + (list.row_count || 0) + (list.unresolved_count || 0), 0))}</div><span className="stat-label">Shortlist entries</span></div></div>
           <div className="stat"><span className="stat-icon"><CheckCircle2 size={19} /></span><div><div className="stat-number small">{loading ? '—' : lists.length ? date(lists[0].added_at) : '—'}</div><span className="stat-label">Latest addition</span></div></div>
         </section>
+        <StudentSearch request={api} onOpen={navigateStudent} />
         <section className="panel" aria-label="Company shortlists">
           <div className="toolbar"><label className="search"><Search size={15} /><input aria-label="Search companies" placeholder="Search company or position…" value={query} onChange={e => setLibraryView(previous => ({ ...previous, query: e.target.value }))} /></label><select aria-label="Filter by round" value={round} onChange={e => setLibraryView(previous => ({ ...previous, round: e.target.value }))}><option value="">All rounds</option>{roundCategories.map(value => <option key={value}>{value}</option>)}</select></div>
           {loading ? <div className="loading"><Busy /> Loading shortlists…</div> : lists.length === 0 ? <div className="empty"><h3>No shortlists yet.</h3></div> : <ShortlistLibrary groups={shownGroups} filterKey={search || round ? JSON.stringify([search, round]) : ''} expanded={libraryView.expanded} onToggle={(key, open) => setLibraryView(previous => ({ ...previous, expanded: { ...previous.expanded, [key]: open } }))} onOpen={navigateLibrary} />}
         </section>
       </div>}
+      {initialView === 'library' && selectedStudent && <>
+        <a href="/" className="back" onClick={openLibrary}><ArrowLeft size={13} />All company shortlists</a>
+        <StudentProfilePage key={selectedStudent} roll={selectedStudent} request={api} onOpen={navigateLibrary} />
+      </>}
       {initialView === 'library' && selectedId && <>
         <a href="/" className="back" onClick={openLibrary}><ArrowLeft size={13} />All company shortlists</a>
         {!detail && (detailError ? <section className="panel cardbody"><Alert message={detailError} /><button className="secondary" onClick={() => { setDetailResult(null); setDetailAttempt(value => value + 1); }}><RotateCcw size={14} />Try again</button></section> : <section className="panel shortlist-loading" role="status" aria-live="polite" aria-busy="true"><LoaderCircle className="spinner" size={25} /><span>Loading shortlist…</span></section>)}
