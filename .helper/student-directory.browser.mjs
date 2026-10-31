@@ -53,6 +53,8 @@ try {
   assert.equal(await evaluate("document.querySelector('.student-profile-info .cpi-hidden').textContent"), '...');
   assert.equal(await evaluate("document.querySelector('.library-view').hidden"), true);
   assert.equal(await evaluate("document.querySelectorAll('.student-company').length"), 2);
+  assert.equal(await evaluate("document.querySelectorAll('[aria-label=\"Student shortlist statistics\"] .stat').length"), 3);
+  assert.equal(await evaluate("document.querySelector('[aria-label=\"Student shortlist statistics\"]').textContent.includes('Unconfirmed shortlist matches')"), true);
   await screenshot('student-profile-desktop');
   await evaluate("document.querySelector('[aria-label=" + JSON.stringify('Show student CPI') + "]').click()");
   assert.equal(await evaluate("document.querySelector('.student-profile-info dl > div:nth-child(3) dd').textContent"), '8.37');
@@ -70,6 +72,12 @@ try {
   await until("document.querySelector('.student-profile-info')");
   assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth + 1'), true, 'Student profiles fit a mobile viewport');
   await screenshot('student-profile-mobile');
+  await send('Page.navigate', { url: 'http://127.0.0.1:8791/students/230002' }, sessionId);
+  await until("document.querySelector('.student-profile-info')");
+  assert.equal(await evaluate("document.querySelectorAll('[aria-label=\"Student shortlist statistics\"] .stat').length"), 2, 'Zero possible matches must not create a misleading third counter');
+  assert.equal(await evaluate("document.querySelector('[aria-label=\"Student shortlist statistics\"]').textContent.includes('matches')"), false);
+  assert.equal(await evaluate("getComputedStyle(document.querySelector('[aria-label=\"Student shortlist statistics\"]')).gridTemplateColumns.split(' ').length"), 2, 'The two remaining counters fill the row');
+  await screenshot('student-profile-no-ambiguities');
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ passed: true, synthetic_only: true, checked: ['homepage search', 'student profile route', 'loading', 'CPI hidden and revealed', 'confirmed/possible separation', 'company shortlist navigation', 'Back restores open company groups and search results', 'direct profile reload', 'mobile layout'], screenshots: '.helper/screenshots/student-profile-*.png' }));
 } finally { socket?.close(); chrome.kill('SIGTERM'); await new Promise(resolve => chrome.exitCode !== null ? resolve() : chrome.once('exit', resolve)); await rm(profile, { recursive: true, force: true }); }

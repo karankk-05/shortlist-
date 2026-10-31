@@ -17,9 +17,9 @@ const server = createServer(async (request, response) => {
     const { cpi: _cpi, ...summary } = student;
     return json(response, 200, { query: url.searchParams.get('q'), students: [{ student: summary, confirmed_count: 2, possible_count: 1 }], has_more: false, next_offset: null });
   }
-  if (url.pathname === '/api/v1/students/230001') {
+  if (['/api/v1/students/230001', '/api/v1/students/230002'].includes(url.pathname)) {
     await new Promise(resolve => setTimeout(resolve, 300));
-    return json(response, 200, { student, confirmed: lists.filter(row => ['example-test', 'example-interview'].includes(row.id)).map(row => ({ ...row, match: 'confirmed', round_categories: [row.round] })), possible: [{ ...lists[0], match: 'possible', round_categories: ['Test'] }], company_count: 2 });
+    return json(response, 200, { student: { ...student, roll: url.pathname.split('/').at(-1) }, confirmed: lists.filter(row => ['example-test', 'example-interview'].includes(row.id)).map(row => ({ ...row, match: 'confirmed', round_categories: [row.round] })), possible: url.pathname.endsWith('/230002') ? [] : [{ ...lists[0], match: 'possible', round_categories: ['Test'] }], company_count: 2 });
   }
   if (url.pathname.startsWith('/api/v1/shortlists/')) {
     await new Promise(done => setTimeout(done, 2500));
