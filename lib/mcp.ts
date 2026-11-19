@@ -54,7 +54,7 @@ async function lookup(env: Cloudflare.Env, input: unknown) {
     let match_type = 'identifier';
     if (!matches.length) { matches = index.filter(item => item.name === name); match_type = 'exact_name'; }
     if (!matches.length && !/^\d+$/.test(value) && !value.includes('@')) { matches = index.filter(item => tokens.every(token => item.name.split(' ').some(part => part === token || token.length === 1 && part.startsWith(token)))); match_type = 'name_tokens'; }
-    return { query, match_type: matches.length ? match_type : 'none', matches: matches.slice(0, 30).map(item => item.row), match_count: matches.length, truncated: matches.length > 30 };
+    return { query, match_type: matches.length ? match_type : 'none', matches: matches.map(item => item.row), match_count: matches.length, truncated: false };
   }) };
 }
 async function attachment(env: Cloudflare.Env, input: Record<string, unknown>) {

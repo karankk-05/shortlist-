@@ -19,7 +19,7 @@ function text(value: unknown, label: string, maximum: number) {
 /** An agent proposes identifiers; only the pinned master supplies alternative details. */
 export function validateIdentityReviews(input: unknown, master: readonly StudentRow[]): IdentityReview[] {
   if (input === undefined) return [];
-  if (!Array.isArray(input) || input.length > 1000) throw new InputError('unresolved_candidates must be an array of at most 1,000 source entries.');
+  if (!Array.isArray(input)) throw new InputError('unresolved_candidates must be an array.');
   const byRoll = new Map(master.map(row => [row.roll.toUpperCase(), row]));
   const positions = new Set<number>();
   return input.map((entry, index) => {
@@ -29,7 +29,7 @@ export function validateIdentityReviews(input: unknown, master: readonly Student
     const source_name = text(entry.source_name, 'source_name', 240), reason = text(entry.reason, 'identity review reason', 500);
     if (!Number.isSafeInteger(entry.source_index) || entry.source_index < 1 || entry.source_index > 100000 || positions.has(entry.source_index)) throw new InputError('Each unresolved candidate needs a distinct positive source_index (original candidate position).');
     positions.add(entry.source_index);
-    if (!Array.isArray(entry.possible_rolls) || entry.possible_rolls.length > 20) throw new InputError('Supply up to 20 possible_rolls per unresolved candidate; use [] when no supported match exists.');
+    if (!Array.isArray(entry.possible_rolls)) throw new InputError('possible_rolls must be an array; use [] when no supported match exists.');
     const seen = new Set<string>();
     const possible_matches = entry.possible_rolls.map((value: unknown) => {
       const roll = text(value, 'possible roll', 40).toUpperCase(), row = byRoll.get(roll);

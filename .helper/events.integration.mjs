@@ -135,9 +135,29 @@ try {
     { name: 'Synthetic Example A', roll: '230001', programme: 'BTech', branch: 'Test department', cpi: null, email: 'synthetic-a@example.invalid' },
     { name: 'Synthetic Example B', roll: '230002', programme: 'BS', branch: 'Test department', cpi: 8.5, email: 'synthetic-b@example.invalid' },
   ];
-  const master = (await call('/api/v1/master', { method: 'PUT', owner: true, data: { name: 'Synthetic MCP master', rows }, expected: 201 })).value;
+  const alternatives = Array.from({ length: 45 }, (_, index) => ({ ...rows[0], name: 'Synthetic Shared Name', roll: String(239000 + index), email: `shared-${index}@example.invalid` }));
+  const master = (await call('/api/v1/master', { method: 'PUT', owner: true, data: { name: 'Synthetic MCP master', rows: [...rows, ...alternatives] }, expected: 201 })).value;
   const lookup = JSON.parse((await tool('lookup_students', { queries: ['230001', 'synthetic-b@example.invalid', 'Missing Synthetic Candidate'] })).content[0].text);
   assert.equal(lookup.master_id, master.id); assert.deepEqual(lookup.results[0].matches, [rows[0]]); assert.deepEqual(lookup.results[1].matches, [rows[1]]); assert.equal(lookup.results[2].matches.length, 0);
+  const broadLookup = JSON.parse((await tool('lookup_students', { queries: ['Synthetic Shared Name', 'Shared'] })).content[0].text);
+  for (const result of broadLookup.results) {
+    assert.deepEqual(result.matches, alternatives, 'Exact-name and token lookups return every supported alternative');
+    assert.equal(result.match_count, alternatives.length);
+    assert.equal(result.truncated, false);
+  }
+  const schema = (await call('/api/v1/openapi.json')).value.paths['/shortlists'].post.requestBody.content['application/json'].schema;
+  assert.equal(schema.properties.unresolved_candidates.maxItems, undefined);
+  assert.equal(schema.properties.unresolved_candidates.items.properties.possible_rolls.maxItems, undefined);
+  const unresolved = Array.from({ length: 1001 }, (_, index) => ({ source_name: 'Synthetic Shared Name', source_index: index + 1, reason: 'Synthetic ambiguity count regression.', possible_rolls: index === 0 ? broadLookup.results[0].matches.map(row => row.roll) : [] }));
+  const ambiguityDraft = JSON.parse((await tool('portal_write', { path: 'shortlists', body: { company: 'Synthetic ambiguity count fixture', role: 'Unknown', round: 'Test', season: 'Synthetic only', master_id: master.id, rows: [], unresolved_candidates: unresolved } })).content[0].text);
+  assert.ok(ambiguityDraft.version_id);
+  assert.equal(ambiguityDraft.candidate_count, unresolved.length);
+  const ambiguityPublication = JSON.parse((await tool('portal_write', { path: `shortlists/${ambiguityDraft.shortlist_id}/publish`, body: { version_id: ambiguityDraft.version_id, expected_current_version_id: null, acknowledge_warnings: true } })).content[0].text);
+  assert.equal(ambiguityPublication.published, true);
+  const ambiguityPublic = JSON.parse((await tool('portal_read', { path: `shortlists/${ambiguityDraft.shortlist_id}?public_view=1` })).content[0].text);
+  assert.equal(ambiguityPublic.version.candidate_count, unresolved.length, 'Each ambiguity counts once regardless of the number of alternatives');
+  assert.equal(ambiguityPublic.unresolved_candidates.length, unresolved.length);
+  assert.deepEqual(ambiguityPublic.unresolved_candidates[0].possible_matches, alternatives, 'Publishing preserves alternatives beyond the former limits');
   for (const path of ['https://attacker.invalid/', '../keys', 'keys', 'mail/sync', 'mail/interval', 'master']) assert.equal((await tool('portal_write', { path, body: {} })).isError, true);
   const subParams = callback => ({ name: 'shortlist.work_available', arguments: { queue: 'mail-shortlists' }, delivery: { mode: 'webhook', url: callback, secret } });
   const beforeInvalid = fetches;

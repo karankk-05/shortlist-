@@ -21,6 +21,15 @@ test('unmatched candidates and single uncertain alternatives remain represented'
   assert.deepEqual(validateRows([], true).rows, []);
   assert.throws(() => validateRows([]));
 });
+test('accepts all supported alternatives and more than 1,000 ambiguous source candidates', () => {
+  const manyMatches = Array.from({ length: 45 }, (_, index) => ({ ...master[0], roll: String(230000 + index) }));
+  const entry = { ...pending, possible_rolls: manyMatches.map(row => row.roll) };
+  const alternatives = validateIdentityReviews([entry], manyMatches);
+  assert.deepEqual(alternatives[0].possible_matches, manyMatches);
+  assert.deepEqual(publicShortlistData({ rows: [], unresolved_candidates: alternatives }).unresolved_candidates[0].possible_matches, manyMatches);
+  const candidates = Array.from({ length: 1001 }, (_, index) => ({ ...entry, source_index: index + 1, possible_rolls: [manyMatches[0].roll] }));
+  assert.equal(validateIdentityReviews(candidates, manyMatches).length, candidates.length);
+});
 test('rejects fabricated option details, absent rolls, duplicate positions and invalid metadata', () => {
   for (const entry of [
     { ...pending, possible_matches: master }, { ...pending, possible_rolls: ['unknown'] },
